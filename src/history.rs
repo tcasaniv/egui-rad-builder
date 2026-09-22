@@ -158,7 +158,8 @@ mod tests {
     fn make_test_snapshot(widget_count: usize, x_offset: f32) -> HistorySnapshot {
         let mut p = Project::default();
         for i in 1..=widget_count {
-            p.widgets.push(make_test_widget(i as u64, x_offset * i as f32, 10.0));
+            p.widgets
+                .push(make_test_widget(i as u64, x_offset * i as f32, 10.0));
         }
         let sel = if widget_count > 0 {
             vec![WidgetId::new(1)]
