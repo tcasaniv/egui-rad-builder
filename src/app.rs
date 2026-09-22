@@ -6,6 +6,7 @@
 
 use crate::{
     highlight::Highlighter,
+    history::{History, HistorySnapshot},
     project::Project,
     widget::{self, DockArea, Widget, WidgetId, WidgetKind, escape, snap_pos_with_grid},
 };
@@ -104,6 +105,8 @@ pub struct RadBuilderApp {
     preview_mode: bool,
     /// Active tab in the right panel (0 = Inspector, 1 = Code Output)
     right_panel_tab: usize,
+    /// Undo and redo history manager
+    history: History,
 }
 
 impl Default for RadBuilderApp {
@@ -133,11 +136,98 @@ impl Default for RadBuilderApp {
             codegen_comments: true,
             preview_mode: false,
             right_panel_tab: 0,
+            history: History::default(),
         }
     }
 }
 
 impl RadBuilderApp {
+    fn current_snapshot(&self) -> HistorySnapshot {
+        HistorySnapshot::new(self.project.clone(), self.selected.clone(), self.next_id)
+    }
+
+    fn apply_snapshot(&mut self, snapshot: HistorySnapshot) {
+        self.project = snapshot.project;
+        self.selected = snapshot.selected;
+        self.next_id = snapshot.next_id;
+        self.selected
+            .retain(|id| self.project.widgets.iter().any(|w| w.id == *id));
+    }
+
+    fn push_undo(&mut self) {
+        let snapshot = self.current_snapshot();
+        self.history.push(snapshot);
+    }
+
+    fn undo(&mut self) {
+        let current = self.current_snapshot();
+        if let Some(prev) = self.history.undo(current) {
+            self.apply_snapshot(prev);
+            self.set_status("Undo".into());
+        }
+    }
+
+    fn redo(&mut self) {
+        let current = self.current_snapshot();
+        if let Some(next) = self.history.redo(current) {
+            self.apply_snapshot(next);
+            self.set_status("Redo".into());
+        }
+    }
+
+    fn delete_selected(&mut self) {
+        if !self.selected.is_empty() {
+            self.push_undo();
+            let to_delete: Vec<_> = self.selected.clone();
+            self.project.widgets.retain(|w| !to_delete.contains(&w.id));
+            self.selected.clear();
+        }
+    }
+
+    fn duplicate_selected(&mut self) {
+        if self.selected.is_empty() {
+            return;
+        }
+        self.push_undo();
+        let selected_ids: Vec<_> = self.selected.clone();
+        let mut new_ids = Vec::new();
+        for sel_id in selected_ids {
+            if let Some(w) = self
+                .project
+                .widgets
+                .iter()
+                .find(|w| w.id == sel_id)
+                .cloned()
+            {
+                let new_id = WidgetId::new(self.next_id);
+                self.next_id += 1;
+                let mut dup = w;
+                dup.id = new_id;
+                dup.z = new_id.as_z();
+                dup.pos.x += 20.0;
+                dup.pos.y += 20.0;
+                self.project.widgets.push(dup);
+                new_ids.push(new_id);
+            }
+        }
+        self.selected = new_ids;
+    }
+
+    fn paste(&mut self) {
+        if let Some(w) = self.clipboard.clone() {
+            self.push_undo();
+            let new_id = WidgetId::new(self.next_id);
+            self.next_id += 1;
+            let mut pasted = w;
+            pasted.id = new_id;
+            pasted.z = new_id.as_z();
+            pasted.pos.x += 20.0;
+            pasted.pos.y += 20.0;
+            self.project.widgets.push(pasted);
+            self.selected = vec![new_id];
+        }
+    }
+
     fn normalize_project_widget_ids(&mut self) {
         let mut seen = HashSet::new();
         let mut next_id = self
@@ -223,6 +313,7 @@ impl RadBuilderApp {
         area: DockArea,
         area_origin: Pos2,
     ) {
+        self.push_undo();
         let id = WidgetId::new(self.next_id);
         self.next_id += 1;
 
@@ -310,6 +401,7 @@ impl RadBuilderApp {
                         self.project = project;
                         self.normalize_project_widget_ids();
                         self.selected.clear();
+                        self.history.clear();
                         self.current_file = Some(path.clone());
                         self.set_status(format!("Loaded {}", path.display()));
                     }
@@ -1125,6 +1217,8 @@ impl RadBuilderApp {
                     .id_salt("palette_shortcuts")
                     .default_open(false)
                     .show(ui, |ui| {
+                        ui.small("Ctrl+Z: undo");
+                        ui.small("Ctrl+Y: redo");
                         ui.small("Arrows: nudge widget");
                         ui.small("Delete: remove");
                         ui.small("Ctrl+C/V: copy/paste");
@@ -1425,6 +1519,7 @@ impl RadBuilderApp {
                     self.project = Project::default();
                     self.next_id = 1;
                     self.selected.clear();
+                    self.history.clear();
                     self.current_file = None;
                     self.set_status("New project created".into());
                     ui.close_kind(egui::UiKind::Menu);
@@ -1501,6 +1596,7 @@ impl RadBuilderApp {
                         self.project = p;
                         self.normalize_project_widget_ids();
                         self.selected.clear();
+                        self.history.clear();
                     }
                     ui.close_kind(egui::UiKind::Menu);
                 }
@@ -1509,6 +1605,25 @@ impl RadBuilderApp {
 
             ui.push_id("menu_edit", |ui| {
                 ui.menu_button("Edit", |ui| {
+                let can_undo = self.history.can_undo();
+                if ui
+                    .add_enabled(can_undo, egui::Button::new("Undo"))
+                    .on_hover_text("Undo last change (Ctrl+Z)")
+                    .clicked()
+                {
+                    self.undo();
+                    ui.close_kind(egui::UiKind::Menu);
+                }
+                let can_redo = self.history.can_redo();
+                if ui
+                    .add_enabled(can_redo, egui::Button::new("Redo"))
+                    .on_hover_text("Redo last undone change (Ctrl+Y or Ctrl+Shift+Z)")
+                    .clicked()
+                {
+                    self.redo();
+                    ui.close_kind(egui::UiKind::Menu);
+                }
+                ui.separator();
                 let has_selection = !self.selected.is_empty();
                 let _multi_selected = self.selected.len() > 1;
 
@@ -1518,9 +1633,7 @@ impl RadBuilderApp {
                         .on_hover_text("Delete selected (Del)")
                         .clicked()
                     {
-                        let to_delete: Vec<_> = self.selected.clone();
-                        self.project.widgets.retain(|w| !to_delete.contains(&w.id));
-                        self.selected.clear();
+                        self.delete_selected();
                         ui.close_kind(egui::UiKind::Menu);
                     }
                     if ui
@@ -1528,7 +1641,7 @@ impl RadBuilderApp {
                         .on_hover_text("Duplicate selected (Ctrl+D)")
                         .clicked()
                     {
-                        // Handled in keyboard shortcuts
+                        self.duplicate_selected();
                         ui.close_kind(egui::UiKind::Menu);
                     }
                     if ui
@@ -1549,7 +1662,7 @@ impl RadBuilderApp {
                     .on_hover_text("Paste from clipboard (Ctrl+V)")
                     .clicked()
                 {
-                    // Handled in keyboard shortcuts
+                    self.paste();
                     ui.close_kind(egui::UiKind::Menu);
                 }
                 ui.separator();
@@ -1768,6 +1881,7 @@ impl RadBuilderApp {
         if self.selected.len() < 2 {
             return;
         }
+        self.push_undo();
         let min_x = self
             .selected
             .iter()
@@ -1785,6 +1899,7 @@ impl RadBuilderApp {
         if self.selected.len() < 2 {
             return;
         }
+        self.push_undo();
         let max_right = self
             .selected
             .iter()
@@ -1802,6 +1917,7 @@ impl RadBuilderApp {
         if self.selected.len() < 2 {
             return;
         }
+        self.push_undo();
         let centers: Vec<f32> = self
             .selected
             .iter()
@@ -1820,6 +1936,7 @@ impl RadBuilderApp {
         if self.selected.len() < 2 {
             return;
         }
+        self.push_undo();
         let min_y = self
             .selected
             .iter()
@@ -1837,6 +1954,7 @@ impl RadBuilderApp {
         if self.selected.len() < 2 {
             return;
         }
+        self.push_undo();
         let max_bottom = self
             .selected
             .iter()
@@ -1854,6 +1972,7 @@ impl RadBuilderApp {
         if self.selected.len() < 2 {
             return;
         }
+        self.push_undo();
         let centers: Vec<f32> = self
             .selected
             .iter()
@@ -1872,6 +1991,7 @@ impl RadBuilderApp {
         if self.selected.len() < 3 {
             return;
         }
+        self.push_undo();
         let mut widgets: Vec<_> = self
             .selected
             .iter()
@@ -1898,6 +2018,7 @@ impl RadBuilderApp {
         if self.selected.len() < 3 {
             return;
         }
+        self.push_undo();
         let mut widgets: Vec<_> = self
             .selected
             .iter()
@@ -1924,6 +2045,7 @@ impl RadBuilderApp {
         if self.selected.len() < 2 {
             return;
         }
+        self.push_undo();
         // Use width of first selected widget
         let target_width = self
             .selected
@@ -1942,6 +2064,7 @@ impl RadBuilderApp {
         if self.selected.len() < 2 {
             return;
         }
+        self.push_undo();
         // Use height of first selected widget
         let target_height = self
             .selected
@@ -2964,8 +3087,13 @@ impl RadBuilderApp {
 
 impl eframe::App for RadBuilderApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let snapshot_before_frame = self.current_snapshot();
+
         // Keyboard shortcuts - check input first, then apply changes
+        let wants_kb = ctx.wants_keyboard_input();
         let (
+            undo_pressed,
+            redo_pressed,
             delete_pressed,
             duplicate_pressed,
             generate_pressed,
@@ -2979,25 +3107,37 @@ impl eframe::App for RadBuilderApp {
             send_back,
             toggle_preview,
         ) = ctx.input(|i| {
-            let del = i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace);
-            let dup = i.modifiers.command && i.key_pressed(egui::Key::D);
-            let gencode = i.modifiers.command && i.key_pressed(egui::Key::G);
-            let copy = i.modifiers.command && i.key_pressed(egui::Key::C);
-            let paste = i.modifiers.command && i.key_pressed(egui::Key::V);
+            let undo = !wants_kb && i.modifiers.command && !i.modifiers.shift && i.key_pressed(egui::Key::Z);
+            let redo = !wants_kb
+                && ((i.modifiers.command && i.key_pressed(egui::Key::Y))
+                    || (i.modifiers.command && i.modifiers.shift && i.key_pressed(egui::Key::Z)));
+            let del = !wants_kb && (i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace));
+            let dup = !wants_kb && i.modifiers.command && i.key_pressed(egui::Key::D);
+            let gencode = !wants_kb && i.modifiers.command && i.key_pressed(egui::Key::G);
+            let copy = !wants_kb && i.modifiers.command && i.key_pressed(egui::Key::C);
+            let paste = !wants_kb && i.modifiers.command && i.key_pressed(egui::Key::V);
             // Arrow keys for nudging
-            let up = i.key_pressed(egui::Key::ArrowUp);
-            let down = i.key_pressed(egui::Key::ArrowDown);
-            let left = i.key_pressed(egui::Key::ArrowLeft);
-            let right = i.key_pressed(egui::Key::ArrowRight);
+            let up = !wants_kb && i.key_pressed(egui::Key::ArrowUp);
+            let down = !wants_kb && i.key_pressed(egui::Key::ArrowDown);
+            let left = !wants_kb && i.key_pressed(egui::Key::ArrowLeft);
+            let right = !wants_kb && i.key_pressed(egui::Key::ArrowRight);
             // Z-order: ] = bring to front, [ = send to back
-            let front = i.key_pressed(egui::Key::CloseBracket);
-            let back = i.key_pressed(egui::Key::OpenBracket);
+            let front = !wants_kb && i.key_pressed(egui::Key::CloseBracket);
+            let back = !wants_kb && i.key_pressed(egui::Key::OpenBracket);
             // F5: Toggle preview mode
             let preview = i.key_pressed(egui::Key::F5);
             (
-                del, dup, gencode, copy, paste, up, down, left, right, front, back, preview,
+                undo, redo, del, dup, gencode, copy, paste, up, down, left, right, front, back, preview,
             )
         });
+
+        // Undo / Redo
+        if undo_pressed {
+            self.undo();
+        }
+        if redo_pressed {
+            self.redo();
+        }
 
         // F5: Toggle preview mode
         if toggle_preview {
@@ -3006,13 +3146,12 @@ impl eframe::App for RadBuilderApp {
 
         // Delete selected widgets
         if delete_pressed && !self.selected.is_empty() {
-            let to_delete: Vec<_> = self.selected.clone();
-            self.project.widgets.retain(|w| !to_delete.contains(&w.id));
-            self.selected.clear();
+            self.delete_selected();
         }
 
         // Arrow keys: Nudge all selected widgets
         if !self.selected.is_empty() && (arrow_up || arrow_down || arrow_left || arrow_right) {
+            self.push_undo();
             let nudge = self.grid_size.max(1.0);
             let selected_ids: Vec<_> = self.selected.clone();
             for sel_id in selected_ids {
@@ -3038,6 +3177,7 @@ impl eframe::App for RadBuilderApp {
 
         // Z-order controls (apply to all selected)
         if bring_front && !self.selected.is_empty() {
+            self.push_undo();
             let max_z = self.project.widgets.iter().map(|w| w.z).max().unwrap_or(0);
             let selected_ids: Vec<_> = self.selected.clone();
             for (i, sel_id) in selected_ids.iter().enumerate() {
@@ -3047,6 +3187,7 @@ impl eframe::App for RadBuilderApp {
             }
         }
         if send_back && !self.selected.is_empty() {
+            self.push_undo();
             let min_z = self.project.widgets.iter().map(|w| w.z).min().unwrap_or(0);
             let selected_ids: Vec<_> = self.selected.clone();
             for (i, sel_id) in selected_ids.iter().enumerate() {
@@ -3065,42 +3206,13 @@ impl eframe::App for RadBuilderApp {
         }
 
         // Ctrl+V: Paste widget from clipboard
-        if paste_pressed && let Some(w) = self.clipboard.clone() {
-            let new_id = WidgetId::new(self.next_id);
-            self.next_id += 1;
-            let mut pasted = w;
-            pasted.id = new_id;
-            pasted.z = new_id.as_z();
-            pasted.pos.x += 20.0;
-            pasted.pos.y += 20.0;
-            self.project.widgets.push(pasted);
-            self.selected = vec![new_id];
+        if paste_pressed && self.clipboard.is_some() {
+            self.paste();
         }
 
         // Ctrl+D: Duplicate all selected widgets
         if duplicate_pressed && !self.selected.is_empty() {
-            let selected_ids: Vec<_> = self.selected.clone();
-            let mut new_ids = Vec::new();
-            for sel_id in selected_ids {
-                if let Some(w) = self
-                    .project
-                    .widgets
-                    .iter()
-                    .find(|w| w.id == sel_id)
-                    .cloned()
-                {
-                    let new_id = WidgetId::new(self.next_id);
-                    self.next_id += 1;
-                    let mut dup = w;
-                    dup.id = new_id;
-                    dup.z = new_id.as_z();
-                    dup.pos.x += 20.0;
-                    dup.pos.y += 20.0;
-                    self.project.widgets.push(dup);
-                    new_ids.push(new_id);
-                }
-            }
-            self.selected = new_ids;
+            self.duplicate_selected();
         }
 
         // Ctrl+G: Generate code
@@ -3155,6 +3267,17 @@ impl eframe::App for RadBuilderApp {
 
         if self.spawning.is_some() {
             ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
+        }
+
+        // Interactive history commit (canvas dragging, resize handles, inspector edits)
+        let pointer_down = ctx.input(|i| i.pointer.any_down());
+        let kb_active = ctx.wants_keyboard_input();
+        if pointer_down || kb_active {
+            if self.project != snapshot_before_frame.project {
+                self.history.set_pending_if_none(snapshot_before_frame);
+            }
+        } else {
+            self.history.commit_pending_if_changed(&self.project);
         }
     }
 }

@@ -59,10 +59,10 @@ impl History {
     /// Clears any redo history and discards any pending interactive snapshot.
     pub(crate) fn push(&mut self, snapshot: HistorySnapshot) {
         self.pending_snapshot = None;
-        if let Some(top) = self.undo_stack.last() {
-            if top.project == snapshot.project {
-                return;
-            }
+        if let Some(top) = self.undo_stack.last()
+            && top.project == snapshot.project
+        {
+            return;
         }
         self.undo_stack.push(snapshot);
         if self.undo_stack.len() > self.max_depth {
@@ -80,10 +80,10 @@ impl History {
 
     /// Commits the pending interactive snapshot if the project actually changed.
     pub(crate) fn commit_pending_if_changed(&mut self, current_project: &Project) {
-        if let Some(pending) = self.pending_snapshot.take() {
-            if &pending.project != current_project {
-                self.push(pending);
-            }
+        if let Some(pending) = self.pending_snapshot.take()
+            && &pending.project != current_project
+        {
+            self.push(pending);
         }
     }
 
@@ -94,6 +94,7 @@ impl History {
     }
 
     /// Discards any pending interactive snapshot without committing it.
+    #[allow(dead_code)]
     pub(crate) fn cancel_pending(&mut self) {
         self.pending_snapshot = None;
     }
