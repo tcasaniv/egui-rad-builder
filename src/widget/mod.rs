@@ -541,7 +541,6 @@ pub(crate) struct WidgetProps {
     pub(crate) columns: usize,
 
     // --- Display control fields (all serde-defaulted for backward compat) ---
-
     /// Friendly name shown in the Layers panel.
     /// Empty string → falls back to `kind.display_name()`.
     #[serde(default)]
