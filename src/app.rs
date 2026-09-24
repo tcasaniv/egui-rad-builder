@@ -57,6 +57,83 @@ mod tests {
     fn test_codegen_format_default_is_single_file() {
         assert_eq!(CodeGenFormat::default(), CodeGenFormat::SingleFile);
     }
+
+    #[test]
+    fn test_codegen_skips_inactive_widget() {
+        let mut app = super::RadBuilderApp::default();
+        let mut w = crate::widget::Widget {
+            id: crate::widget::WidgetId::new(1),
+            kind: crate::widget::WidgetKind::Button,
+            pos: egui::pos2(10.0, 10.0),
+            size: egui::vec2(80.0, 24.0),
+            z: 1,
+            area: crate::widget::DockArea::Center,
+            props: crate::widget::WidgetProps::default(),
+        };
+        w.props.text = "InactiveBtn".into();
+        w.props.active = false;
+        app.project.widgets.push(w);
+
+        let code = app.generate_single_file();
+        assert!(
+            !code.contains("InactiveBtn"),
+            "inactive widget text should not appear in codegen"
+        );
+    }
+
+    #[test]
+    fn test_codegen_initially_hidden_generates_show_flag() {
+        let mut app = super::RadBuilderApp::default();
+        let mut w = crate::widget::Widget {
+            id: crate::widget::WidgetId::new(42),
+            kind: crate::widget::WidgetKind::Button,
+            pos: egui::pos2(10.0, 10.0),
+            size: egui::vec2(80.0, 24.0),
+            z: 1,
+            area: crate::widget::DockArea::Center,
+            props: crate::widget::WidgetProps::default(),
+        };
+        w.props.text = "SecretBtn".into();
+        w.props.initially_visible = false;
+        app.project.widgets.push(w);
+
+        let code = app.generate_single_file();
+        assert!(
+            code.contains("show_42: bool"),
+            "should have show_42 flag in state"
+        );
+        assert!(
+            code.contains("show_42: false"),
+            "should default show_42 to false"
+        );
+        assert!(
+            code.contains("if state.show_42 {"),
+            "should guard widget with if state.show_42"
+        );
+    }
+
+    #[test]
+    fn test_codegen_emits_tooltip() {
+        let mut app = super::RadBuilderApp::default();
+        let mut w = crate::widget::Widget {
+            id: crate::widget::WidgetId::new(99),
+            kind: crate::widget::WidgetKind::Button,
+            pos: egui::pos2(10.0, 10.0),
+            size: egui::vec2(80.0, 24.0),
+            z: 1,
+            area: crate::widget::DockArea::Center,
+            props: crate::widget::WidgetProps::default(),
+        };
+        w.props.text = "HoverBtn".into();
+        w.props.tooltip = "Click to save".into();
+        app.project.widgets.push(w);
+
+        let code = app.generate_single_file();
+        assert!(
+            code.contains(".on_hover_text(\"Click to save\")"),
+            "should emit on_hover_text with tooltip text"
+        );
+    }
 }
 
 /// Interactive `eframe` application that owns the builder workspace.
@@ -105,6 +182,10 @@ pub struct RadBuilderApp {
     preview_mode: bool,
     /// Active tab in the right panel (0 = Inspector, 1 = Code Output)
     right_panel_tab: usize,
+    /// Active tab in the left panel (0 = Palette, 1 = Layers)
+    left_panel_tab: usize,
+    /// Widget being dragged within the Layers panel for reorder
+    layer_drag: Option<WidgetId>,
     /// Undo and redo history manager
     history: History,
 }
@@ -136,6 +217,8 @@ impl Default for RadBuilderApp {
             codegen_comments: true,
             preview_mode: false,
             right_panel_tab: 0,
+            left_panel_tab: 0,
+            layer_drag: None,
             history: History::default(),
         }
     }
@@ -473,7 +556,30 @@ impl RadBuilderApp {
                     }
                     for &i in &top_idx {
                         let w = &mut self.project.widgets[i];
-                        Self::draw_widget(ui, panel_rect, self.grid_size, &mut self.selected, w);
+                        if !w.props.active {
+                            continue;
+                        }
+                        let op = w.props.opacity.clamp(0.0, 1.0);
+                        if (op - 1.0).abs() > 0.001 {
+                            ui.scope(|ui| {
+                                ui.set_opacity(op);
+                                Self::draw_widget(
+                                    ui,
+                                    panel_rect,
+                                    self.grid_size,
+                                    &mut self.selected,
+                                    w,
+                                );
+                            });
+                        } else {
+                            Self::draw_widget(
+                                ui,
+                                panel_rect,
+                                self.grid_size,
+                                &mut self.selected,
+                                w,
+                            );
+                        }
                     }
                 });
         }
@@ -490,7 +596,30 @@ impl RadBuilderApp {
                     }
                     for &i in &bottom_idx {
                         let w = &mut self.project.widgets[i];
-                        Self::draw_widget(ui, panel_rect, self.grid_size, &mut self.selected, w);
+                        if !w.props.active {
+                            continue;
+                        }
+                        let op = w.props.opacity.clamp(0.0, 1.0);
+                        if (op - 1.0).abs() > 0.001 {
+                            ui.scope(|ui| {
+                                ui.set_opacity(op);
+                                Self::draw_widget(
+                                    ui,
+                                    panel_rect,
+                                    self.grid_size,
+                                    &mut self.selected,
+                                    w,
+                                );
+                            });
+                        } else {
+                            Self::draw_widget(
+                                ui,
+                                panel_rect,
+                                self.grid_size,
+                                &mut self.selected,
+                                w,
+                            );
+                        }
                     }
                 });
         }
@@ -507,7 +636,30 @@ impl RadBuilderApp {
                     }
                     for &i in &left_idx {
                         let w = &mut self.project.widgets[i];
-                        Self::draw_widget(ui, panel_rect, self.grid_size, &mut self.selected, w);
+                        if !w.props.active {
+                            continue;
+                        }
+                        let op = w.props.opacity.clamp(0.0, 1.0);
+                        if (op - 1.0).abs() > 0.001 {
+                            ui.scope(|ui| {
+                                ui.set_opacity(op);
+                                Self::draw_widget(
+                                    ui,
+                                    panel_rect,
+                                    self.grid_size,
+                                    &mut self.selected,
+                                    w,
+                                );
+                            });
+                        } else {
+                            Self::draw_widget(
+                                ui,
+                                panel_rect,
+                                self.grid_size,
+                                &mut self.selected,
+                                w,
+                            );
+                        }
                     }
                 });
         }
@@ -524,7 +676,30 @@ impl RadBuilderApp {
                     }
                     for &i in &right_idx {
                         let w = &mut self.project.widgets[i];
-                        Self::draw_widget(ui, panel_rect, self.grid_size, &mut self.selected, w);
+                        if !w.props.active {
+                            continue;
+                        }
+                        let op = w.props.opacity.clamp(0.0, 1.0);
+                        if (op - 1.0).abs() > 0.001 {
+                            ui.scope(|ui| {
+                                ui.set_opacity(op);
+                                Self::draw_widget(
+                                    ui,
+                                    panel_rect,
+                                    self.grid_size,
+                                    &mut self.selected,
+                                    w,
+                                );
+                            });
+                        } else {
+                            Self::draw_widget(
+                                ui,
+                                panel_rect,
+                                self.grid_size,
+                                &mut self.selected,
+                                w,
+                            );
+                        }
                     }
                 });
         }
@@ -545,11 +720,33 @@ impl RadBuilderApp {
             // Draw Center + Free widgets inside the center canvas
             for &i in &center_idx {
                 let w = &mut self.project.widgets[i];
-                Self::draw_widget(ui, painter_rect, self.grid_size, &mut self.selected, w);
+                if !w.props.active {
+                    continue;
+                }
+                let op = w.props.opacity.clamp(0.0, 1.0);
+                if (op - 1.0).abs() > 0.001 {
+                    ui.scope(|ui| {
+                        ui.set_opacity(op);
+                        Self::draw_widget(ui, painter_rect, self.grid_size, &mut self.selected, w);
+                    });
+                } else {
+                    Self::draw_widget(ui, painter_rect, self.grid_size, &mut self.selected, w);
+                }
             }
             for &i in &free_idx {
                 let w = &mut self.project.widgets[i];
-                Self::draw_widget(ui, painter_rect, self.grid_size, &mut self.selected, w);
+                if !w.props.active {
+                    continue;
+                }
+                let op = w.props.opacity.clamp(0.0, 1.0);
+                if (op - 1.0).abs() > 0.001 {
+                    ui.scope(|ui| {
+                        ui.set_opacity(op);
+                        Self::draw_widget(ui, painter_rect, self.grid_size, &mut self.selected, w);
+                    });
+                } else {
+                    Self::draw_widget(ui, painter_rect, self.grid_size, &mut self.selected, w);
+                }
             }
 
             // --- Drag ghost + drop ---
@@ -1043,6 +1240,8 @@ impl RadBuilderApp {
         let is_selected = selected.contains(&w.id);
         let stroke = if is_selected {
             Stroke::new(2.0, Color32::LIGHT_BLUE)
+        } else if !w.props.initially_visible {
+            Stroke::new(1.0, Color32::from_rgba_unmultiplied(120, 160, 255, 160))
         } else {
             Stroke::new(1.0, Color32::from_gray(90))
         };
@@ -1052,6 +1251,15 @@ impl RadBuilderApp {
             stroke,
             egui::StrokeKind::Outside,
         );
+        if !w.props.initially_visible && is_edit_mode {
+            painter.text(
+                rect.right_top() + vec2(-4.0, 4.0),
+                egui::Align2::RIGHT_TOP,
+                "hidden",
+                egui::FontId::proportional(10.0),
+                Color32::from_rgba_unmultiplied(120, 160, 255, 200),
+            );
+        }
         if is_edit_mode {
             let pad = 6.0;
             let expanded = rect.expand(pad);
@@ -1244,6 +1452,153 @@ impl RadBuilderApp {
         }
     }
 
+    fn layers_ui(&mut self, ui: &mut egui::Ui) {
+        ui.push_id("layers_ui", |ui| {
+            ui.heading("Layers");
+            ui.separator();
+            ui.label("Manage, reorder, and toggle widgets");
+            ui.add_space(4.0);
+
+            let ordered: Vec<WidgetId> = {
+                let mut v: Vec<(WidgetId, i32)> =
+                    self.project.widgets.iter().map(|w| (w.id, w.z)).collect();
+                v.sort_by_key(|&(_, z)| std::cmp::Reverse(z));
+                v.into_iter().map(|(id, _)| id).collect()
+            };
+
+            egui::ScrollArea::vertical()
+                .id_salt("layers_scroll")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let mut drop_target: Option<usize> = None;
+
+                    for (pos, &wid) in ordered.iter().enumerate() {
+                        if self.layer_drag.is_some() {
+                            let drop_zone = ui.allocate_rect(
+                                egui::Rect::from_min_size(
+                                    ui.cursor().min,
+                                    egui::vec2(ui.available_width(), 4.0),
+                                ),
+                                egui::Sense::hover(),
+                            );
+                            if drop_zone.hovered() {
+                                drop_target = Some(pos);
+                                ui.painter().hline(
+                                    drop_zone.rect.x_range(),
+                                    drop_zone.rect.center().y,
+                                    egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
+                                );
+                            }
+                        }
+
+                        let Some(idx) = self.project.widgets.iter().position(|w| w.id == wid)
+                        else {
+                            continue;
+                        };
+
+                        let is_selected = self.selected.contains(&wid);
+                        let (label, active, init_vis) = {
+                            let w = &self.project.widgets[idx];
+                            let n = if w.props.name.is_empty() {
+                                w.kind.display_name().to_string()
+                            } else {
+                                w.props.name.clone()
+                            };
+                            (n, w.props.active, w.props.initially_visible)
+                        };
+
+                        ui.horizontal(|ui| {
+                            let active_btn = ui
+                                .small_button(if active { "✅" } else { "🚫" })
+                                .on_hover_text(if active {
+                                    "Active (included in canvas & codegen)\nClick to deactivate"
+                                } else {
+                                    "Inactive (excluded from canvas & codegen)\nClick to activate"
+                                });
+                            if active_btn.clicked() {
+                                self.push_undo();
+                                self.project.widgets[idx].props.active = !active;
+                            }
+
+                            let vis_btn = ui
+                                .add_enabled(
+                                    active,
+                                    egui::Button::new(if init_vis { "👁" } else { "🙈" }).small(),
+                                )
+                                .on_hover_text(if init_vis {
+                                    "Starts visible\nClick to start hidden"
+                                } else {
+                                    "Starts hidden\nClick to start visible"
+                                });
+                            if vis_btn.clicked() {
+                                self.push_undo();
+                                self.project.widgets[idx].props.initially_visible = !init_vis;
+                            }
+
+                            let label_text = if active {
+                                if init_vis {
+                                    label.clone()
+                                } else {
+                                    format!("({label})")
+                                }
+                            } else {
+                                format!("~~{label}~~")
+                            };
+
+                            let row = ui.selectable_label(is_selected, format!("⣿ {label_text}"));
+                            if row.drag_started() {
+                                self.layer_drag = Some(wid);
+                            }
+                            if row.clicked() {
+                                let shift = ui.input(|i| i.modifiers.shift);
+                                if shift {
+                                    if is_selected {
+                                        self.selected.retain(|&x| x != wid);
+                                    } else {
+                                        self.selected.push(wid);
+                                    }
+                                } else {
+                                    self.selected = vec![wid];
+                                }
+                            }
+                        });
+                    }
+
+                    if self.layer_drag.is_some() {
+                        let dz = ui.allocate_rect(
+                            egui::Rect::from_min_size(
+                                ui.cursor().min,
+                                egui::vec2(ui.available_width(), 4.0),
+                            ),
+                            egui::Sense::hover(),
+                        );
+                        if dz.hovered() {
+                            drop_target = Some(ordered.len());
+                        }
+                    }
+
+                    if self.project.widgets.is_empty() {
+                        ui.label("No widgets yet.\nDrag from 🎨 Palette to add one.");
+                    }
+
+                    if ui.input(|i| i.pointer.any_released()) {
+                        if let Some(src_id) = self.layer_drag.take() {
+                            if let Some(target) = drop_target {
+                                self.push_undo();
+                                let total = ordered.len() as i32;
+                                let new_z = total - target as i32;
+                                if let Some(w) =
+                                    self.project.widgets.iter_mut().find(|w| w.id == src_id)
+                                {
+                                    w.z = new_z;
+                                }
+                            }
+                        }
+                    }
+                });
+        });
+    }
+
     fn inspector_ui(&mut self, ui: &mut egui::Ui) {
         let grid = self.grid_size; // read before mutably borrowing self
         ui.push_id("inspector_ui", |ui| {
@@ -1251,7 +1606,41 @@ impl RadBuilderApp {
             ui.separator();
             if let Some(w) = self.selected_mut() {
                 ui.label(format!("ID: {:?}", w.id));
-                ui.add_space(6.0);
+                ui.add_space(4.0);
+
+                // Friendly Name
+                ui.horizontal(|ui| {
+                    ui.label("Name:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut w.props.name)
+                            .hint_text(w.kind.display_name())
+                            .id_salt(("inspector_name", w.id)),
+                    );
+                });
+
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Display").strong());
+
+                ui.checkbox(&mut w.props.active, "Active")
+                    .on_hover_text("If unchecked, excluded from canvas and codegen completely.");
+
+                ui.add_enabled_ui(w.props.active, |ui| {
+                    ui.checkbox(&mut w.props.initially_visible, "Starts visible")
+                        .on_hover_text("If unchecked, starts hidden in runtime/codegen; shown with dashed border in canvas.");
+
+                    ui.horizontal(|ui| {
+                        ui.label("Opacity:");
+                        ui.add(
+                            egui::Slider::new(&mut w.props.opacity, 0.0..=1.0)
+                                .step_by(0.05)
+                                .custom_formatter(|v, _| format!("{:.0}%", v * 100.0)),
+                        );
+                    });
+                });
+
+                ui.separator();
+                ui.add_space(4.0);
+
                 match w.kind {
                     WidgetKind::Label
                     | WidgetKind::Heading
@@ -2186,6 +2575,12 @@ impl RadBuilderApp {
             "    enable_top: bool, enable_bottom: bool, enable_left: bool, enable_right: bool,\n",
         );
         for w in &self.project.widgets {
+            if !w.props.active {
+                continue;
+            }
+            if !w.props.initially_visible {
+                out.push_str(&format!("    show_{}: bool,\n", w.id));
+            }
             match w.kind {
                 WidgetKind::TextEdit => out.push_str(&format!("    text_{}: String,\n", w.id)),
                 WidgetKind::Checkbox => out.push_str(&format!("    checked_{}: bool,\n", w.id)),
@@ -2240,6 +2635,12 @@ impl RadBuilderApp {
         ));
 
         for w in &self.project.widgets {
+            if !w.props.active {
+                continue;
+            }
+            if !w.props.initially_visible {
+                out.push_str(&format!("            show_{}: false,\n", w.id));
+            }
             match w.kind {
                 WidgetKind::TextEdit => {
                     out.push_str(&format!(
@@ -2344,8 +2745,32 @@ impl RadBuilderApp {
 
         // helper macro to emit a widget block at rect (origin + local pos)
         let emit_widget = |w: &Widget, out: &mut String, origin: &str| {
+            if !w.props.active {
+                return;
+            }
+
             let pos = w.pos;
             let size = w.size;
+
+            let needs_vis = !w.props.initially_visible;
+            if needs_vis {
+                let name = if w.props.name.is_empty() {
+                    w.kind.display_name().to_string()
+                } else {
+                    w.props.name.clone()
+                };
+                out.push_str(&format!("    // {} (starts hidden)\n", escape(&name)));
+                out.push_str(&format!("    if state.show_{} {{\n", w.id));
+            }
+
+            let needs_opacity = (w.props.opacity - 1.0).abs() > 0.001;
+            if needs_opacity {
+                out.push_str(&format!(
+                    "    ui.scope(|ui| {{ ui.set_opacity({:.2}_f32);\n",
+                    w.props.opacity
+                ));
+            }
+
             out.push_str(&format!("    ui.push_id((\"widget\", {}), |ui| {{\n", w.id));
             match w.kind {
 				WidgetKind::MenuButton=>{
@@ -2857,6 +3282,21 @@ impl RadBuilderApp {
                 }
             }
             out.push_str("    });\n");
+
+            if !w.props.tooltip.is_empty() {
+                out.push_str(&format!(
+                    "    // tooltip\n    // .on_hover_text(\"{}\")\n",
+                    escape(&w.props.tooltip)
+                ));
+            }
+
+            if needs_opacity {
+                out.push_str("    });\n");
+            }
+
+            if needs_vis {
+                out.push_str("    }\n");
+            }
         };
 
         let mut top = Vec::new();
@@ -3244,8 +3684,29 @@ impl eframe::App for RadBuilderApp {
         if self.palette_open {
             egui::SidePanel::left("palette")
                 .resizable(true)
+                .min_width(180.0)
                 .show(ctx, |ui| {
-                    self.palette_ui(ui);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .selectable_label(self.left_panel_tab == 0, "🎨 Palette")
+                            .clicked()
+                        {
+                            self.left_panel_tab = 0;
+                        }
+                        if ui
+                            .selectable_label(self.left_panel_tab == 1, "🗂 Layers")
+                            .clicked()
+                        {
+                            self.left_panel_tab = 1;
+                        }
+                    });
+                    ui.separator();
+
+                    match self.left_panel_tab {
+                        0 => self.palette_ui(ui),
+                        1 => self.layers_ui(ui),
+                        _ => {}
+                    }
                 });
         }
         egui::SidePanel::right("inspector")
