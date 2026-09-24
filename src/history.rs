@@ -152,6 +152,7 @@ mod tests {
             z: id as i32,
             area: DockArea::Free,
             props: WidgetProps::default(),
+            parent: None,
         }
     }
 

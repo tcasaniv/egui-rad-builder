@@ -69,6 +69,7 @@ mod tests {
             z: 1,
             area: crate::widget::DockArea::Center,
             props: crate::widget::WidgetProps::default(),
+            parent: None,
         };
         w.props.text = "InactiveBtn".into();
         w.props.active = false;
@@ -92,6 +93,7 @@ mod tests {
             z: 1,
             area: crate::widget::DockArea::Center,
             props: crate::widget::WidgetProps::default(),
+            parent: None,
         };
         w.props.text = "SecretBtn".into();
         w.props.initially_visible = false;
@@ -123,6 +125,7 @@ mod tests {
             z: 1,
             area: crate::widget::DockArea::Center,
             props: crate::widget::WidgetProps::default(),
+            parent: None,
         };
         w.props.text = "HoverBtn".into();
         w.props.tooltip = "Click to save".into();
@@ -414,6 +417,7 @@ impl RadBuilderApp {
             z: id.as_z(),
             area,
             props,
+            parent: None,
         };
         self.project.widgets.push(w);
         self.selected = vec![id];
