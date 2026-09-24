@@ -501,6 +501,7 @@ Leverage `egui_dock` as an application template layer where generated RAD window
 6. ~~Add native file save/load (`rfd` crate)~~ ✅ File menu with New/Open/Save/Save As
 7. ~~Add error handling with user feedback~~ ✅ Status message display
 8. **NEW:** Add `.on_hover_text()` tooltips throughout UI (egui best practice) ✅ Partial - menu items have tooltips
+9. ~~Layers panel with drag-and-drop reorder and display controls (Active, Starts Visible, Opacity)~~ ✅
 
 ### Phase 3: Alignment & Selection *(Top Priority from Issue #15 + Mobius)* ✅ MOSTLY COMPLETE
 1. ~~Multi-select widgets (Shift+click)~~ ✅ Shift+click toggle selection
@@ -516,17 +517,18 @@ Leverage `egui_dock` as an application template layer where generated RAD window
 3. ~~Generate idiomatic Rust code~~ ✅ Better formatting, proper indentation
 4. ~~Option to generate separate files~~ ✅ CodeGenFormat enum (Single File, Separate Files, UI Only)
 5. ~~Project scaffolding/skeleton generation~~ ✅ Cargo.toml generation in Separate Files mode
-6. **NEW:** Consider signals/slots pattern in generated code (Mobius `egui_mobius`) - *Planned*
+6. ~~Tooltip code generation and visibility state flags~~ ✅ `.on_hover_text()` and `show_` runtime guards
+7. **NEW:** Consider signals/slots pattern in generated code (Mobius `egui_mobius`) - *Planned*
 
 ### Phase 5: Architecture Evolution *(Inspired by Mobius-ECS)* - PARTIAL
 1. **Two-tier separation:** Core library (`egui-rad-widgets`) + Builder app
-2. ✅ Panel tabs for Inspector/Code switching *(simpler alternative to egui_dock)*
+2. ✅ Panel tabs for Inspector/Code switching and Palette/Layers switching *(simpler alternative to egui_dock)*
 3. `egui_dock` full docking system *(researched, deferred - see Recent Changes)*
 4. Optional ECS-based widget management for complex projects
 5. Template system for declarative UI definitions
 6. Hot-reload support for live development
 
-**Status:** Tabbed panel interface implemented. Full egui_dock integration researched but deferred in favor of simpler tab solution.
+**Status:** Tabbed panel interface implemented for both right and left panels. Full egui_dock integration researched but deferred in favor of simpler tab solution.
 
 ### Phase 6: Advanced Features
 1. Multi-page/screen support with navigation
