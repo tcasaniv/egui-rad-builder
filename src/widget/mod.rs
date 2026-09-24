@@ -531,7 +531,7 @@ pub(crate) struct WidgetProps {
     pub(crate) icon: String,
     // color (rgba 0-255)
     pub(crate) color: [u8; 4],
-    // optional tooltip text
+    // optional tooltip text shown on hover in the generated app
     pub(crate) tooltip: String,
     // layout direction (for Group)
     pub(crate) horizontal: bool,
@@ -539,6 +539,40 @@ pub(crate) struct WidgetProps {
     pub(crate) enabled: bool,
     // column count (for Columns widget)
     pub(crate) columns: usize,
+
+    // --- Display control fields (all serde-defaulted for backward compat) ---
+
+    /// Friendly name shown in the Layers panel.
+    /// Empty string → falls back to `kind.display_name()`.
+    #[serde(default)]
+    pub(crate) name: String,
+
+    /// If `false`, the widget is completely excluded from the canvas and
+    /// from generated code. Use this to deactivate a widget during
+    /// prototyping without deleting it.
+    #[serde(default = "widget_prop_default_true")]
+    pub(crate) active: bool,
+
+    /// Initial visibility state when the prototype runs.
+    /// `false` = starts hidden; actions can show/hide it at runtime.
+    /// In design mode the widget is always shown (with a dashed outline),
+    /// so you can still position and configure it.
+    #[serde(default = "widget_prop_default_true")]
+    pub(crate) initially_visible: bool,
+
+    /// Visual opacity in the range `[0.0, 1.0]`.
+    /// Applied both in the canvas preview and in the generated code
+    /// via `ui.scope(|ui| { ui.set_opacity(x); … })`.
+    #[serde(default = "widget_prop_default_opacity")]
+    pub(crate) opacity: f32,
+}
+
+fn widget_prop_default_true() -> bool {
+    true
+}
+
+fn widget_prop_default_opacity() -> f32 {
+    1.0
 }
 
 impl Default for WidgetProps {
@@ -561,6 +595,10 @@ impl Default for WidgetProps {
             horizontal: false,
             enabled: true,
             columns: 2,
+            name: String::new(),
+            active: true,
+            initially_visible: true,
+            opacity: 1.0,
         }
     }
 }
@@ -659,6 +697,76 @@ mod tests {
         assert!(props.min <= props.max);
         assert_eq!(props.columns, 2);
         assert!(props.enabled);
+        // New display-control fields
+        assert!(props.name.is_empty());
+        assert!(props.active);
+        assert!(props.initially_visible);
+        assert!((props.opacity - 1.0).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_widget_props_display_control_defaults() {
+        // Verify the three display-control fields match spec
+        let props = WidgetProps::default();
+        assert!(props.active, "active should default to true");
+        assert!(
+            props.initially_visible,
+            "initially_visible should default to true"
+        );
+        assert_eq!(props.opacity, 1.0, "opacity should default to 1.0");
+    }
+
+    #[test]
+    fn test_widget_props_serde_backward_compat() {
+        // JSON that predates the new fields should deserialize with correct defaults.
+        let legacy_json = r#"{
+            "text": "Click me",
+            "checked": false,
+            "value": 0.5,
+            "min": 0.0,
+            "max": 1.0,
+            "items": [],
+            "selected": 0,
+            "url": "https://example.com",
+            "year": 2024,
+            "month": 1,
+            "day": 1,
+            "icon": "🖼️",
+            "color": [100, 149, 237, 255],
+            "tooltip": "",
+            "horizontal": false,
+            "enabled": true,
+            "columns": 2
+        }"#;
+
+        let props: WidgetProps =
+            serde_json::from_str(legacy_json).expect("should deserialize legacy JSON");
+
+        assert_eq!(props.text, "Click me");
+        assert!(props.name.is_empty(), "name should default to empty string");
+        assert!(props.active, "active should default to true");
+        assert!(
+            props.initially_visible,
+            "initially_visible should default to true"
+        );
+        assert_eq!(props.opacity, 1.0, "opacity should default to 1.0");
+    }
+
+    #[test]
+    fn test_widget_props_serde_round_trip() {
+        let mut props = WidgetProps::default();
+        props.name = "My Button".into();
+        props.active = false;
+        props.initially_visible = false;
+        props.opacity = 0.5;
+
+        let json = serde_json::to_string(&props).expect("serialize");
+        let decoded: WidgetProps = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(decoded.name, "My Button");
+        assert!(!decoded.active);
+        assert!(!decoded.initially_visible);
+        assert!((decoded.opacity - 0.5).abs() < 0.001);
     }
 
     #[test]
