@@ -89,11 +89,15 @@ impl WidgetCategory {
 pub(crate) struct Widget {
     pub(crate) id: WidgetId,
     pub(crate) kind: WidgetKind,
-    pub(crate) pos: Pos2,  // Top-left relative to canvas
+    pub(crate) pos: Pos2,  // Top-left relative to canvas (or relative to parent container)
     pub(crate) size: Vec2, // Desired size on canvas
     pub(crate) z: i32,     // draw order
     pub(crate) area: DockArea,
     pub(crate) props: WidgetProps,
+    /// Optional parent container widget ID.
+    /// If `Some(parent_id)`, `pos` is relative to the parent widget's inner content origin.
+    #[serde(default)]
+    pub(crate) parent: Option<WidgetId>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -225,6 +229,19 @@ impl WidgetKind {
             WidgetKind::Columns => "Columns",
             WidgetKind::Window => "Window",
         }
+    }
+
+    /// Returns `true` if this widget kind can contain child widgets.
+    pub const fn is_container(&self) -> bool {
+        matches!(
+            self,
+            WidgetKind::Group
+                | WidgetKind::ScrollBox
+                | WidgetKind::Columns
+                | WidgetKind::TabBar
+                | WidgetKind::Window
+                | WidgetKind::CollapsingHeader
+        )
     }
 
     /// Returns all widget kinds in a given category
@@ -866,5 +883,91 @@ mod tests {
         let input_widgets = WidgetKind::widgets_in_category(WidgetCategory::Input);
         assert!(input_widgets.contains(&WidgetKind::TextEdit));
         assert!(input_widgets.contains(&WidgetKind::Slider));
+    }
+
+    #[test]
+    fn test_widget_parent_serde_backward_compat() {
+        let legacy_widget_json = r#"{
+            "id": 1,
+            "kind": {"t": "Button"},
+            "pos": [10.0, 20.0],
+            "size": [80.0, 24.0],
+            "z": 1,
+            "area": "Free",
+            "props": {
+                "text": "OldButton",
+                "checked": false,
+                "value": 0.5,
+                "min": 0.0,
+                "max": 1.0,
+                "items": [],
+                "selected": 0,
+                "url": "https://example.com",
+                "year": 2024,
+                "month": 1,
+                "day": 1,
+                "icon": "🖼️",
+                "color": [100, 149, 237, 255],
+                "tooltip": "",
+                "horizontal": false,
+                "enabled": true,
+                "columns": 2
+            }
+        }"#;
+
+        let w: Widget = serde_json::from_str(legacy_widget_json)
+            .expect("legacy widget json without parent should deserialize");
+        assert_eq!(w.parent, None, "parent should default to None");
+    }
+
+    #[test]
+    fn test_project_hierarchy_helpers() {
+        let mut proj = crate::project::Project::default();
+        let w_group = Widget {
+            id: WidgetId::new(1),
+            kind: WidgetKind::Group,
+            pos: pos2(0.0, 0.0),
+            size: egui::vec2(200.0, 200.0),
+            z: 1,
+            area: DockArea::Center,
+            props: WidgetProps::default(),
+            parent: None,
+        };
+        let w_btn = Widget {
+            id: WidgetId::new(2),
+            kind: WidgetKind::Button,
+            pos: pos2(10.0, 10.0),
+            size: egui::vec2(80.0, 24.0),
+            z: 2,
+            area: DockArea::Center,
+            props: WidgetProps::default(),
+            parent: Some(WidgetId::new(1)),
+        };
+        let w_sub = Widget {
+            id: WidgetId::new(3),
+            kind: WidgetKind::Label,
+            pos: pos2(5.0, 5.0),
+            size: egui::vec2(60.0, 18.0),
+            z: 3,
+            area: DockArea::Center,
+            props: WidgetProps::default(),
+            parent: Some(WidgetId::new(2)),
+        };
+        proj.widgets.push(w_group);
+        proj.widgets.push(w_btn);
+        proj.widgets.push(w_sub);
+
+        let children = proj.children_of(WidgetId::new(1));
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].id, WidgetId::new(2));
+
+        assert!(proj.is_descendant_of(WidgetId::new(3), WidgetId::new(1)));
+        assert!(proj.is_descendant_of(WidgetId::new(2), WidgetId::new(1)));
+        assert!(!proj.is_descendant_of(WidgetId::new(1), WidgetId::new(2)));
+
+        let desc = proj.get_descendants(WidgetId::new(1));
+        assert_eq!(desc.len(), 2);
+        assert!(desc.contains(&WidgetId::new(2)));
+        assert!(desc.contains(&WidgetId::new(3)));
     }
 }

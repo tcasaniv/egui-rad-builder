@@ -12,6 +12,52 @@ pub(crate) struct Project {
     pub(crate) panel_right_enabled: bool,
 }
 
+impl Project {
+    /// Returns the direct child widgets belonging to `parent_id`, sorted by `z` descending.
+    pub(crate) fn children_of(&self, parent_id: crate::widget::WidgetId) -> Vec<&Widget> {
+        let mut list: Vec<&Widget> = self
+            .widgets
+            .iter()
+            .filter(|w| w.parent == Some(parent_id))
+            .collect();
+        list.sort_by_key(|w| std::cmp::Reverse(w.z));
+        list
+    }
+
+    /// Returns `true` if `candidate_child` is a descendant of `ancestor_id` (prevent circular parenting).
+    pub(crate) fn is_descendant_of(
+        &self,
+        candidate_child: crate::widget::WidgetId,
+        ancestor_id: crate::widget::WidgetId,
+    ) -> bool {
+        let mut curr = candidate_child;
+        while let Some(w) = self.widgets.iter().find(|w| w.id == curr) {
+            if let Some(p) = w.parent {
+                if p == ancestor_id {
+                    return true;
+                }
+                curr = p;
+            } else {
+                break;
+            }
+        }
+        false
+    }
+
+    /// Recursively collects all descendant IDs for a given widget.
+    pub(crate) fn get_descendants(&self, root_id: crate::widget::WidgetId) -> Vec<crate::widget::WidgetId> {
+        let mut descendants = Vec::new();
+        let mut queue = vec![root_id];
+        while let Some(parent) = queue.pop() {
+            for child in self.widgets.iter().filter(|w| w.parent == Some(parent)) {
+                descendants.push(child.id);
+                queue.push(child.id);
+            }
+        }
+        descendants
+    }
+}
+
 impl Default for Project {
     fn default() -> Self {
         Self {
@@ -24,3 +70,4 @@ impl Default for Project {
         }
     }
 }
+

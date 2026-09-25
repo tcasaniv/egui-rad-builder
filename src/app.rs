@@ -69,6 +69,7 @@ mod tests {
             z: 1,
             area: crate::widget::DockArea::Center,
             props: crate::widget::WidgetProps::default(),
+            parent: None,
         };
         w.props.text = "InactiveBtn".into();
         w.props.active = false;
@@ -92,6 +93,7 @@ mod tests {
             z: 1,
             area: crate::widget::DockArea::Center,
             props: crate::widget::WidgetProps::default(),
+            parent: None,
         };
         w.props.text = "SecretBtn".into();
         w.props.initially_visible = false;
@@ -123,6 +125,7 @@ mod tests {
             z: 1,
             area: crate::widget::DockArea::Center,
             props: crate::widget::WidgetProps::default(),
+            parent: None,
         };
         w.props.text = "HoverBtn".into();
         w.props.tooltip = "Click to save".into();
@@ -132,6 +135,112 @@ mod tests {
         assert!(
             code.contains(".on_hover_text(\"Click to save\")"),
             "should emit on_hover_text with tooltip text"
+        );
+    }
+
+    #[test]
+    fn test_reparent_widget_coordinate_conversion() {
+        let mut app = super::RadBuilderApp::default();
+        app.grid_size = 1.0;
+
+        let group = crate::widget::Widget {
+            id: crate::widget::WidgetId::new(1),
+            kind: crate::widget::WidgetKind::Group,
+            pos: egui::pos2(50.0, 50.0),
+            size: egui::vec2(200.0, 150.0),
+            z: 1,
+            area: crate::widget::DockArea::Center,
+            props: crate::widget::WidgetProps {
+                text: "MyGroup".into(),
+                ..Default::default()
+            },
+            parent: None,
+        };
+
+        let btn = crate::widget::Widget {
+            id: crate::widget::WidgetId::new(2),
+            kind: crate::widget::WidgetKind::Button,
+            pos: egui::pos2(80.0, 100.0),
+            size: egui::vec2(60.0, 24.0),
+            z: 2,
+            area: crate::widget::DockArea::Center,
+            props: crate::widget::WidgetProps {
+                text: "InsideBtn".into(),
+                ..Default::default()
+            },
+            parent: None,
+        };
+
+        app.project.widgets.push(group);
+        app.project.widgets.push(btn);
+
+        // Reparent button into group
+        app.reparent_widget(crate::widget::WidgetId::new(2), Some(crate::widget::WidgetId::new(1)));
+
+        let reparented_btn = app.project.widgets.iter().find(|w| w.id == crate::widget::WidgetId::new(2)).unwrap();
+        assert_eq!(reparented_btn.parent, Some(crate::widget::WidgetId::new(1)));
+        // Group offset for non-empty title is (8.0, 26.0), so content origin is (58.0, 76.0)
+        // Button was at (80.0, 100.0), so relative pos is (80 - 58, 100 - 76) = (22.0, 24.0)
+        assert_eq!(reparented_btn.pos, egui::pos2(22.0, 24.0));
+
+        // Computing abs pos should return back (80.0, 100.0)
+        let abs_pos = app.compute_abs_pos(crate::widget::WidgetId::new(2));
+        assert_eq!(abs_pos, egui::pos2(80.0, 100.0));
+
+        // Cycle prevention: attempting to reparent group into button should do nothing
+        app.reparent_widget(crate::widget::WidgetId::new(1), Some(crate::widget::WidgetId::new(2)));
+        let group_check = app.project.widgets.iter().find(|w| w.id == crate::widget::WidgetId::new(1)).unwrap();
+        assert_eq!(group_check.parent, None);
+
+        // Unparent button back to root: pos should return to absolute (80.0, 100.0)
+        app.reparent_widget(crate::widget::WidgetId::new(2), None);
+        let unparented_btn = app.project.widgets.iter().find(|w| w.id == crate::widget::WidgetId::new(2)).unwrap();
+        assert_eq!(unparented_btn.parent, None);
+        assert_eq!(unparented_btn.pos, egui::pos2(80.0, 100.0));
+    }
+
+    #[test]
+    fn test_codegen_recursive_container_emits_children() {
+        let mut app = super::RadBuilderApp::default();
+        let group = crate::widget::Widget {
+            id: crate::widget::WidgetId::new(10),
+            kind: crate::widget::WidgetKind::Group,
+            pos: egui::pos2(20.0, 30.0),
+            size: egui::vec2(250.0, 180.0),
+            z: 1,
+            area: crate::widget::DockArea::Center,
+            props: crate::widget::WidgetProps {
+                text: "SettingsGroup".into(),
+                ..Default::default()
+            },
+            parent: None,
+        };
+
+        let btn = crate::widget::Widget {
+            id: crate::widget::WidgetId::new(11),
+            kind: crate::widget::WidgetKind::Button,
+            pos: egui::pos2(15.0, 25.0),
+            size: egui::vec2(90.0, 24.0),
+            z: 2,
+            area: crate::widget::DockArea::Center,
+            props: crate::widget::WidgetProps {
+                text: "SaveSettings".into(),
+                ..Default::default()
+            },
+            parent: Some(crate::widget::WidgetId::new(10)),
+        };
+
+        app.project.widgets.push(group);
+        app.project.widgets.push(btn);
+
+        let code = app.generate_single_file();
+        // The root CentralPanel iterates only root widgets, so it should not emit SaveSettings directly on canvas.min
+        // SaveSettings must be emitted inside the Frame::group closure using ui.min_rect().min
+        assert!(code.contains("egui::Frame::group"), "should emit Frame::group");
+        assert!(code.contains("SaveSettings"), "should emit child button");
+        assert!(
+            code.contains("ui.min_rect().min + egui::vec2(15.0,25.0)"),
+            "child button should use relative origin ui.min_rect().min"
         );
     }
 }
@@ -261,7 +370,11 @@ impl RadBuilderApp {
     fn delete_selected(&mut self) {
         if !self.selected.is_empty() {
             self.push_undo();
-            let to_delete: Vec<_> = self.selected.clone();
+            let mut to_delete = Vec::new();
+            for &sel_id in &self.selected {
+                to_delete.push(sel_id);
+                to_delete.extend(self.project.get_descendants(sel_id));
+            }
             self.project.widgets.retain(|w| !to_delete.contains(&w.id));
             self.selected.clear();
         }
@@ -414,9 +527,117 @@ impl RadBuilderApp {
             z: id.as_z(),
             area,
             props,
+            parent: None,
         };
         self.project.widgets.push(w);
         self.selected = vec![id];
+    }
+
+    /// Returns the inner content offset for a container widget.
+    pub(crate) fn container_content_offset(kind: WidgetKind, props_text: &str) -> egui::Vec2 {
+        match kind {
+            WidgetKind::Group => {
+                if !props_text.is_empty() {
+                    vec2(8.0, 26.0)
+                } else {
+                    vec2(8.0, 8.0)
+                }
+            }
+            WidgetKind::Window => vec2(8.0, 28.0),
+            WidgetKind::ScrollBox => vec2(6.0, 6.0),
+            WidgetKind::TabBar => vec2(6.0, 28.0),
+            WidgetKind::CollapsingHeader => vec2(8.0, 24.0),
+            WidgetKind::Columns => vec2(6.0, 6.0),
+            _ => vec2(6.0, 6.0),
+        }
+    }
+
+    /// Computes the absolute canvas position of a widget by traversing up its parent chain.
+    pub(crate) fn compute_abs_pos(&self, wid: WidgetId) -> Pos2 {
+        let Some(w) = self.project.widgets.iter().find(|x| x.id == wid) else {
+            return Pos2::ZERO;
+        };
+        match w.parent {
+            None => w.pos,
+            Some(pid) => {
+                let parent_pos = self.compute_abs_pos(pid);
+                let offset = self
+                    .project
+                    .widgets
+                    .iter()
+                    .find(|x| x.id == pid)
+                    .map(|pw| Self::container_content_offset(pw.kind, &pw.props.text))
+                    .unwrap_or(egui::Vec2::ZERO);
+                parent_pos + offset + w.pos.to_vec2()
+            }
+        }
+    }
+
+    /// Reparents a widget to a new parent (or makes it root if None),
+    /// keeping its visual position on the canvas intact and clamping within new parent bounds.
+    pub(crate) fn reparent_widget(&mut self, wid: WidgetId, new_parent: Option<WidgetId>) {
+        let current_parent = self
+            .project
+            .widgets
+            .iter()
+            .find(|x| x.id == wid)
+            .and_then(|x| x.parent);
+
+        if current_parent == new_parent {
+            return;
+        }
+
+        // Prevent cyclic parenting
+        if let Some(pid) = new_parent {
+            if pid == wid || self.project.is_descendant_of(pid, wid) {
+                return;
+            }
+        }
+
+        let abs_pos = self.compute_abs_pos(wid);
+
+        let mut new_pos = match new_parent {
+            None => abs_pos,
+            Some(pid) => {
+                let parent_abs = self.compute_abs_pos(pid);
+                let offset = self
+                    .project
+                    .widgets
+                    .iter()
+                    .find(|x| x.id == pid)
+                    .map(|pw| Self::container_content_offset(pw.kind, &pw.props.text))
+                    .unwrap_or(egui::Vec2::ZERO);
+                let content_origin = parent_abs + offset;
+                pos2(
+                    (abs_pos.x - content_origin.x).max(0.0),
+                    (abs_pos.y - content_origin.y).max(0.0),
+                )
+            }
+        };
+
+        // Clamp to parent bounds if nested
+        if let Some(pid) = new_parent {
+            if let Some(pw) = self.project.widgets.iter().find(|x| x.id == pid) {
+                let child_size = self
+                    .project
+                    .widgets
+                    .iter()
+                    .find(|x| x.id == wid)
+                    .map(|x| x.size)
+                    .unwrap_or(vec2(50.0, 30.0));
+                let max_x = (pw.size.x - child_size.x).max(0.0);
+                let max_y = (pw.size.y - child_size.y).max(0.0);
+                new_pos.x = new_pos.x.clamp(0.0, max_x);
+                new_pos.y = new_pos.y.clamp(0.0, max_y);
+            }
+        }
+
+        let snapped_pos = snap_pos_with_grid(new_pos, self.grid_size);
+
+        if let Some(w) = self.project.widgets.iter_mut().find(|x| x.id == wid) {
+            w.parent = new_parent;
+            w.pos = snapped_pos;
+        }
     }
 
     /// Returns the first selected widget for editing (inspector uses this)
@@ -525,22 +746,24 @@ impl RadBuilderApp {
         self.live_right = None;
         self.live_center = None;
 
-        // -------- 1) Bucket INDICES (not &mut) by area in a read-only pass --------
-        let mut top_idx = Vec::new();
-        let mut bottom_idx = Vec::new();
-        let mut left_idx = Vec::new();
-        let mut right_idx = Vec::new();
-        let mut center_idx = Vec::new();
-        let mut free_idx = Vec::new();
+        // -------- 1) Bucket root widget IDs by area --------
+        let mut top_ids = Vec::new();
+        let mut bottom_ids = Vec::new();
+        let mut left_ids = Vec::new();
+        let mut right_ids = Vec::new();
+        let mut center_ids = Vec::new();
+        let mut free_ids = Vec::new();
 
-        for (i, w) in self.project.widgets.iter().enumerate() {
-            match w.area {
-                Top => top_idx.push(i),
-                Bottom => bottom_idx.push(i),
-                Left => left_idx.push(i),
-                Right => right_idx.push(i),
-                Center => center_idx.push(i),
-                Free => free_idx.push(i),
+        for w in &self.project.widgets {
+            if w.parent.is_none() {
+                match w.area {
+                    Top => top_ids.push(w.id),
+                    Bottom => bottom_ids.push(w.id),
+                    Left => left_ids.push(w.id),
+                    Right => right_ids.push(w.id),
+                    Center => center_ids.push(w.id),
+                    Free => free_ids.push(w.id),
+                }
             }
         }
 
@@ -554,32 +777,15 @@ impl RadBuilderApp {
                     if self.show_grid {
                         self.draw_grid(ui, panel_rect);
                     }
-                    for &i in &top_idx {
-                        let w = &mut self.project.widgets[i];
-                        if !w.props.active {
-                            continue;
-                        }
-                        let op = w.props.opacity.clamp(0.0, 1.0);
-                        if (op - 1.0).abs() > 0.001 {
-                            ui.scope(|ui| {
-                                ui.set_opacity(op);
-                                Self::draw_widget(
-                                    ui,
-                                    panel_rect,
-                                    self.grid_size,
-                                    &mut self.selected,
-                                    w,
-                                );
-                            });
-                        } else {
-                            Self::draw_widget(
-                                ui,
-                                panel_rect,
-                                self.grid_size,
-                                &mut self.selected,
-                                w,
-                            );
-                        }
+                    for wid in top_ids {
+                        Self::draw_widget_tree(
+                            ui,
+                            panel_rect,
+                            self.grid_size,
+                            &mut self.selected,
+                            wid,
+                            &mut self.project.widgets,
+                        );
                     }
                 });
         }
@@ -594,32 +800,15 @@ impl RadBuilderApp {
                     if self.show_grid {
                         self.draw_grid(ui, panel_rect);
                     }
-                    for &i in &bottom_idx {
-                        let w = &mut self.project.widgets[i];
-                        if !w.props.active {
-                            continue;
-                        }
-                        let op = w.props.opacity.clamp(0.0, 1.0);
-                        if (op - 1.0).abs() > 0.001 {
-                            ui.scope(|ui| {
-                                ui.set_opacity(op);
-                                Self::draw_widget(
-                                    ui,
-                                    panel_rect,
-                                    self.grid_size,
-                                    &mut self.selected,
-                                    w,
-                                );
-                            });
-                        } else {
-                            Self::draw_widget(
-                                ui,
-                                panel_rect,
-                                self.grid_size,
-                                &mut self.selected,
-                                w,
-                            );
-                        }
+                    for wid in bottom_ids {
+                        Self::draw_widget_tree(
+                            ui,
+                            panel_rect,
+                            self.grid_size,
+                            &mut self.selected,
+                            wid,
+                            &mut self.project.widgets,
+                        );
                     }
                 });
         }
@@ -634,32 +823,15 @@ impl RadBuilderApp {
                     if self.show_grid {
                         self.draw_grid(ui, panel_rect);
                     }
-                    for &i in &left_idx {
-                        let w = &mut self.project.widgets[i];
-                        if !w.props.active {
-                            continue;
-                        }
-                        let op = w.props.opacity.clamp(0.0, 1.0);
-                        if (op - 1.0).abs() > 0.001 {
-                            ui.scope(|ui| {
-                                ui.set_opacity(op);
-                                Self::draw_widget(
-                                    ui,
-                                    panel_rect,
-                                    self.grid_size,
-                                    &mut self.selected,
-                                    w,
-                                );
-                            });
-                        } else {
-                            Self::draw_widget(
-                                ui,
-                                panel_rect,
-                                self.grid_size,
-                                &mut self.selected,
-                                w,
-                            );
-                        }
+                    for wid in left_ids {
+                        Self::draw_widget_tree(
+                            ui,
+                            panel_rect,
+                            self.grid_size,
+                            &mut self.selected,
+                            wid,
+                            &mut self.project.widgets,
+                        );
                     }
                 });
         }
@@ -674,32 +846,15 @@ impl RadBuilderApp {
                     if self.show_grid {
                         self.draw_grid(ui, panel_rect);
                     }
-                    for &i in &right_idx {
-                        let w = &mut self.project.widgets[i];
-                        if !w.props.active {
-                            continue;
-                        }
-                        let op = w.props.opacity.clamp(0.0, 1.0);
-                        if (op - 1.0).abs() > 0.001 {
-                            ui.scope(|ui| {
-                                ui.set_opacity(op);
-                                Self::draw_widget(
-                                    ui,
-                                    panel_rect,
-                                    self.grid_size,
-                                    &mut self.selected,
-                                    w,
-                                );
-                            });
-                        } else {
-                            Self::draw_widget(
-                                ui,
-                                panel_rect,
-                                self.grid_size,
-                                &mut self.selected,
-                                w,
-                            );
-                        }
+                    for wid in right_ids {
+                        Self::draw_widget_tree(
+                            ui,
+                            panel_rect,
+                            self.grid_size,
+                            &mut self.selected,
+                            wid,
+                            &mut self.project.widgets,
+                        );
                     }
                 });
         }
@@ -718,35 +873,25 @@ impl RadBuilderApp {
             }
 
             // Draw Center + Free widgets inside the center canvas
-            for &i in &center_idx {
-                let w = &mut self.project.widgets[i];
-                if !w.props.active {
-                    continue;
-                }
-                let op = w.props.opacity.clamp(0.0, 1.0);
-                if (op - 1.0).abs() > 0.001 {
-                    ui.scope(|ui| {
-                        ui.set_opacity(op);
-                        Self::draw_widget(ui, painter_rect, self.grid_size, &mut self.selected, w);
-                    });
-                } else {
-                    Self::draw_widget(ui, painter_rect, self.grid_size, &mut self.selected, w);
-                }
+            for wid in center_ids {
+                Self::draw_widget_tree(
+                    ui,
+                    painter_rect,
+                    self.grid_size,
+                    &mut self.selected,
+                    wid,
+                    &mut self.project.widgets,
+                );
             }
-            for &i in &free_idx {
-                let w = &mut self.project.widgets[i];
-                if !w.props.active {
-                    continue;
-                }
-                let op = w.props.opacity.clamp(0.0, 1.0);
-                if (op - 1.0).abs() > 0.001 {
-                    ui.scope(|ui| {
-                        ui.set_opacity(op);
-                        Self::draw_widget(ui, painter_rect, self.grid_size, &mut self.selected, w);
-                    });
-                } else {
-                    Self::draw_widget(ui, painter_rect, self.grid_size, &mut self.selected, w);
-                }
+            for wid in free_ids {
+                Self::draw_widget_tree(
+                    ui,
+                    painter_rect,
+                    self.grid_size,
+                    &mut self.selected,
+                    wid,
+                    &mut self.project.widgets,
+                );
             }
 
             // --- Drag ghost + drop ---
@@ -761,7 +906,7 @@ impl RadBuilderApp {
                     painter.rect_stroke(
                         ghost,
                         CornerRadius::same(4),
-                        Stroke::new(1.0, Color32::LIGHT_BLUE),
+                        Stroke::new(1.0_f32, Color32::LIGHT_BLUE),
                         egui::StrokeKind::Outside,
                     );
 
@@ -777,7 +922,7 @@ impl RadBuilderApp {
                         painter.rect_stroke(
                             hilite,
                             CornerRadius::same(6),
-                            Stroke::new(2.0, Color32::LIGHT_BLUE),
+                            Stroke::new(2.0_f32, Color32::LIGHT_BLUE),
                             egui::StrokeKind::Outside,
                         );
                     }
@@ -809,15 +954,81 @@ impl RadBuilderApp {
             let x = rect.left() + c as f32 * g;
             painter.line_segment(
                 [pos2(x, rect.top()), pos2(x, rect.bottom())],
-                Stroke::new(1.0, Color32::from_gray(40)),
+                Stroke::new(1.0_f32, Color32::from_gray(40)),
             );
         }
         for r in 0..=rows {
             let y = rect.top() + r as f32 * g;
             painter.line_segment(
                 [pos2(rect.left(), y), pos2(rect.right(), y)],
-                Stroke::new(1.0, Color32::from_gray(40)),
+                Stroke::new(1.0_f32, Color32::from_gray(40)),
             );
+        }
+    }
+
+    fn draw_widget_tree(
+        ui: &mut egui::Ui,
+        container_rect: Rect,
+        grid_size: f32,
+        selected: &mut Vec<WidgetId>,
+        widget_id: WidgetId,
+        widgets: &mut [Widget],
+    ) {
+        let idx = match widgets.iter().position(|w| w.id == widget_id) {
+            Some(i) => i,
+            None => return,
+        };
+
+        if !widgets[idx].props.active {
+            return;
+        }
+
+        let is_container = widgets[idx].kind.is_container();
+        let has_children = widgets.iter().any(|w| w.parent == Some(widget_id) && w.props.active);
+        let op = widgets[idx].props.opacity.clamp(0.0, 1.0);
+
+        if (op - 1.0).abs() > 0.001 {
+            ui.scope(|ui| {
+                ui.set_opacity(op);
+                Self::draw_widget(
+                    ui,
+                    container_rect,
+                    grid_size,
+                    selected,
+                    &mut widgets[idx],
+                    has_children,
+                );
+            });
+        } else {
+            Self::draw_widget(
+                ui,
+                container_rect,
+                grid_size,
+                selected,
+                &mut widgets[idx],
+                has_children,
+            );
+        }
+
+        if is_container {
+            let w = &widgets[idx];
+            let widget_rect = Rect::from_min_size(container_rect.min + w.pos.to_vec2(), w.size);
+            let offset = Self::container_content_offset(w.kind, &w.props.text);
+            let inner_rect = Rect::from_min_size(
+                widget_rect.min + offset,
+                (widget_rect.size() - offset - vec2(6.0, 6.0)).max(vec2(10.0, 10.0)),
+            );
+
+            let mut children: Vec<(WidgetId, i32)> = widgets
+                .iter()
+                .filter(|cw| cw.parent == Some(widget_id) && cw.props.active)
+                .map(|cw| (cw.id, cw.z))
+                .collect();
+            children.sort_by_key(|&(_, z)| z);
+
+            for (cid, _) in children {
+                Self::draw_widget_tree(ui, inner_rect, grid_size, selected, cid, widgets);
+            }
         }
     }
 
@@ -827,6 +1038,7 @@ impl RadBuilderApp {
         grid: f32,
         selected: &mut Vec<WidgetId>,
         w: &mut Widget,
+        has_children: bool,
     ) {
         let rect = Rect::from_min_size(canvas_rect.min + w.pos.to_vec2(), w.size);
         ui.push_id(("widget", w.id), |ui| {
@@ -942,7 +1154,9 @@ impl RadBuilderApp {
                             .id_salt(("collapsing_header", w.id))
                             .default_open(w.props.checked)
                             .show(ui, |ui| {
-                                ui.label("… place your inner content here …");
+                                if !has_children {
+                                    ui.weak("(drop widgets here)");
+                                }
                             });
                     }
                     WidgetKind::DatePicker => {
@@ -1126,7 +1340,7 @@ impl RadBuilderApp {
                         let color = Color32::from_rgba_unmultiplied(80, 80, 80, 200);
                         egui::Frame::NONE
                             .fill(color)
-                            .stroke(Stroke::new(1.0, Color32::GRAY))
+                            .stroke(Stroke::new(1.0_f32, Color32::GRAY))
                             .show(ui, |ui| {
                                 ui.set_min_size(w.size);
                                 ui.centered_and_justified(|ui| {
@@ -1146,7 +1360,7 @@ impl RadBuilderApp {
                         );
                         egui::Frame::NONE
                             .fill(color)
-                            .stroke(Stroke::new(1.0, Color32::GRAY))
+                            .stroke(Stroke::new(1.0_f32, Color32::GRAY))
                             .corner_radius(4.0)
                             .show(ui, |ui| {
                                 ui.set_min_size(w.size);
@@ -1163,7 +1377,9 @@ impl RadBuilderApp {
                                     ui.strong(&w.props.text);
                                     ui.separator();
                                 }
-                                ui.label("(group contents)");
+                                if !has_children {
+                                    ui.weak("(drop widgets here)");
+                                }
                             };
                             if w.props.horizontal {
                                 ui.horizontal(add_contents);
@@ -1174,7 +1390,7 @@ impl RadBuilderApp {
                     }
                     WidgetKind::ScrollBox => {
                         egui::Frame::NONE
-                            .stroke(Stroke::new(1.0, Color32::GRAY))
+                            .stroke(Stroke::new(1.0_f32, Color32::GRAY))
                             .corner_radius(4.0)
                             .show(ui, |ui| {
                                 egui::ScrollArea::both()
@@ -1183,7 +1399,11 @@ impl RadBuilderApp {
                                     .max_height(w.size.y - 4.0)
                                     .auto_shrink([false, false])
                                     .show(ui, |ui| {
-                                        ui.label(&w.props.text);
+                                        if !w.props.text.is_empty() {
+                                            ui.label(&w.props.text);
+                                        } else if !has_children {
+                                            ui.weak("(drop widgets here)");
+                                        }
                                     });
                             });
                     }
@@ -1200,13 +1420,15 @@ impl RadBuilderApp {
                     WidgetKind::Columns => {
                         let cols = w.props.columns.max(1);
                         egui::Frame::NONE
-                            .stroke(Stroke::new(1.0, Color32::GRAY))
+                            .stroke(Stroke::new(1.0_f32, Color32::GRAY))
                             .corner_radius(4.0)
                             .show(ui, |ui| {
                                 ui.columns(cols, |columns| {
                                     for (i, col) in columns.iter_mut().enumerate() {
                                         col.label(format!("Col {}", i + 1));
-                                        col.label(&w.props.text);
+                                        if !w.props.text.is_empty() {
+                                            col.label(&w.props.text);
+                                        }
                                     }
                                 });
                             });
@@ -1225,7 +1447,9 @@ impl RadBuilderApp {
                                     );
                                 });
                                 ui.separator();
-                                ui.label("(window contents)");
+                                if !has_children {
+                                    ui.weak("(window contents)");
+                                }
                             });
                         });
                     }
@@ -1239,11 +1463,11 @@ impl RadBuilderApp {
         let painter = ui.painter();
         let is_selected = selected.contains(&w.id);
         let stroke = if is_selected {
-            Stroke::new(2.0, Color32::LIGHT_BLUE)
+            Stroke::new(2.0_f32, Color32::LIGHT_BLUE)
         } else if !w.props.initially_visible {
-            Stroke::new(1.0, Color32::from_rgba_unmultiplied(120, 160, 255, 160))
+            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(120, 160, 255, 160))
         } else {
-            Stroke::new(1.0, Color32::from_gray(90))
+            Stroke::new(1.0_f32, Color32::from_gray(90))
         };
         painter.rect_stroke(
             rect,
@@ -1456,151 +1680,294 @@ impl RadBuilderApp {
         ui.push_id("layers_ui", |ui| {
             ui.heading("Layers");
             ui.separator();
-            ui.label("Manage, reorder, and toggle widgets");
+            ui.label("Hierarchy, reordering, and visibility");
             ui.add_space(4.0);
 
-            let ordered: Vec<WidgetId> = {
-                let mut v: Vec<(WidgetId, i32)> =
-                    self.project.widgets.iter().map(|w| (w.id, w.z)).collect();
-                v.sort_by_key(|&(_, z)| std::cmp::Reverse(z));
-                v.into_iter().map(|(id, _)| id).collect()
-            };
+            let mut reparent_action: Option<(WidgetId, Option<WidgetId>)> = None;
+            let mut z_reorder_action: Option<(WidgetId, i32)> = None;
+            let mut undo_needed = false;
 
             egui::ScrollArea::vertical()
                 .id_salt("layers_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    let mut drop_target: Option<usize> = None;
-
-                    for (pos, &wid) in ordered.iter().enumerate() {
-                        if self.layer_drag.is_some() {
-                            let drop_zone = ui.allocate_rect(
-                                egui::Rect::from_min_size(
-                                    ui.cursor().min,
-                                    egui::vec2(ui.available_width(), 4.0),
-                                ),
-                                egui::Sense::hover(),
-                            );
-                            if drop_zone.hovered() {
-                                drop_target = Some(pos);
-                                ui.painter().hline(
-                                    drop_zone.rect.x_range(),
-                                    drop_zone.rect.center().y,
-                                    egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
-                                );
-                            }
-                        }
-
-                        let Some(idx) = self.project.widgets.iter().position(|w| w.id == wid)
-                        else {
-                            continue;
-                        };
-
-                        let is_selected = self.selected.contains(&wid);
-                        let (label, active, init_vis) = {
-                            let w = &self.project.widgets[idx];
-                            let n = if w.props.name.is_empty() {
-                                w.kind.display_name().to_string()
-                            } else {
-                                w.props.name.clone()
-                            };
-                            (n, w.props.active, w.props.initially_visible)
-                        };
-
-                        ui.horizontal(|ui| {
-                            let active_btn = ui
-                                .small_button(if active { "✅" } else { "🚫" })
-                                .on_hover_text(if active {
-                                    "Active (included in canvas & codegen)\nClick to deactivate"
-                                } else {
-                                    "Inactive (excluded from canvas & codegen)\nClick to activate"
-                                });
-                            if active_btn.clicked() {
-                                self.push_undo();
-                                self.project.widgets[idx].props.active = !active;
-                            }
-
-                            let vis_btn = ui
-                                .add_enabled(
-                                    active,
-                                    egui::Button::new(if init_vis { "👁" } else { "🙈" }).small(),
-                                )
-                                .on_hover_text(if init_vis {
-                                    "Starts visible\nClick to start hidden"
-                                } else {
-                                    "Starts hidden\nClick to start visible"
-                                });
-                            if vis_btn.clicked() {
-                                self.push_undo();
-                                self.project.widgets[idx].props.initially_visible = !init_vis;
-                            }
-
-                            let label_text = if active {
-                                if init_vis {
-                                    label.clone()
-                                } else {
-                                    format!("({label})")
-                                }
-                            } else {
-                                format!("~~{label}~~")
-                            };
-
-                            let row = ui.selectable_label(is_selected, format!("⣿ {label_text}"));
-                            if row.drag_started() {
-                                self.layer_drag = Some(wid);
-                            }
-                            if row.clicked() {
-                                let shift = ui.input(|i| i.modifiers.shift);
-                                if shift {
-                                    if is_selected {
-                                        self.selected.retain(|&x| x != wid);
-                                    } else {
-                                        self.selected.push(wid);
-                                    }
-                                } else {
-                                    self.selected = vec![wid];
-                                }
-                            }
-                        });
+                    if self.project.widgets.is_empty() {
+                        ui.label("No widgets yet.\nDrag from 🎨 Palette to add one.");
+                        return;
                     }
 
-                    if self.layer_drag.is_some() {
-                        let dz = ui.allocate_rect(
+                    // Top drop zone: drop here to unparent to Root
+                    if let Some(dragged_id) = self.layer_drag {
+                        let top_zone = ui.allocate_rect(
                             egui::Rect::from_min_size(
                                 ui.cursor().min,
-                                egui::vec2(ui.available_width(), 4.0),
+                                egui::vec2(ui.available_width(), 6.0),
                             ),
                             egui::Sense::hover(),
                         );
-                        if dz.hovered() {
-                            drop_target = Some(ordered.len());
-                        }
-                    }
-
-                    if self.project.widgets.is_empty() {
-                        ui.label("No widgets yet.\nDrag from 🎨 Palette to add one.");
-                    }
-
-                    if ui.input(|i| i.pointer.any_released()) {
-                        if let Some(src_id) = self.layer_drag.take() {
-                            if let Some(target) = drop_target {
-                                self.push_undo();
-                                let total = ordered.len() as i32;
-                                let new_z = total - target as i32;
-                                if let Some(w) =
-                                    self.project.widgets.iter_mut().find(|w| w.id == src_id)
-                                {
-                                    w.z = new_z;
-                                }
+                        if top_zone.hovered() {
+                            ui.painter().hline(
+                                top_zone.rect.x_range(),
+                                top_zone.rect.center().y,
+                                egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
+                            );
+                            if ui.input(|i| i.pointer.any_released()) {
+                                reparent_action = Some((dragged_id, None));
+                                undo_needed = true;
                             }
                         }
                     }
+
+                    // Render tree recursively starting from root widgets (parent == None)
+                    let root_ids: Vec<WidgetId> = {
+                        let mut roots: Vec<(WidgetId, i32)> = self
+                            .project
+                            .widgets
+                            .iter()
+                            .filter(|w| w.parent.is_none())
+                            .map(|w| (w.id, w.z))
+                            .collect();
+                        roots.sort_by_key(|&(_, z)| std::cmp::Reverse(z));
+                        roots.into_iter().map(|(id, _)| id).collect()
+                    };
+
+                    for &wid in &root_ids {
+                        self.render_layer_tree_node(
+                            ui,
+                            wid,
+                            0,
+                            &mut reparent_action,
+                            &mut z_reorder_action,
+                            &mut undo_needed,
+                        );
+                    }
+
+                    // Clear drag state if mouse released anywhere
+                    if ui.input(|i| i.pointer.any_released()) {
+                        self.layer_drag = None;
+                    }
                 });
+
+            if undo_needed {
+                self.push_undo();
+            }
+            if let Some((child_id, new_parent)) = reparent_action {
+                self.reparent_widget(child_id, new_parent);
+            }
+            if let Some((src_id, new_z)) = z_reorder_action {
+                if let Some(w) = self.project.widgets.iter_mut().find(|w| w.id == src_id) {
+                    w.z = new_z;
+                }
+            }
         });
+    }
+
+    fn render_layer_tree_node(
+        &mut self,
+        ui: &mut egui::Ui,
+        wid: WidgetId,
+        depth: usize,
+        reparent_action: &mut Option<(WidgetId, Option<WidgetId>)>,
+        z_reorder_action: &mut Option<(WidgetId, i32)>,
+        undo_needed: &mut bool,
+    ) {
+        let Some(idx) = self.project.widgets.iter().position(|w| w.id == wid) else {
+            return;
+        };
+
+        let is_selected = self.selected.contains(&wid);
+        let is_container = self.project.widgets[idx].kind.is_container();
+        let (label, active, init_vis, current_z) = {
+            let w = &self.project.widgets[idx];
+            let n = if w.props.name.is_empty() {
+                w.kind.display_name().to_string()
+            } else {
+                w.props.name.clone()
+            };
+            (n, w.props.active, w.props.initially_visible, w.z)
+        };
+
+        let children_ids: Vec<WidgetId> = {
+            let mut list: Vec<(WidgetId, i32)> = self
+                .project
+                .widgets
+                .iter()
+                .filter(|w| w.parent == Some(wid))
+                .map(|w| (w.id, w.z))
+                .collect();
+            list.sort_by_key(|&(_, z)| std::cmp::Reverse(z));
+            list.into_iter().map(|(id, _)| id).collect()
+        };
+
+        let row_resp = ui.horizontal(|ui| {
+            // Indentation
+            if depth > 0 {
+                ui.add_space((depth as f32) * 16.0);
+                ui.label("↳");
+            }
+
+            // Active toggle
+            let active_btn = ui
+                .small_button(if active { "✅" } else { "🚫" })
+                .on_hover_text(if active {
+                    "Active (in canvas & codegen)\nClick to deactivate"
+                } else {
+                    "Inactive (excluded from canvas & codegen)\nClick to activate"
+                });
+            if active_btn.clicked() {
+                *undo_needed = true;
+                self.project.widgets[idx].props.active = !active;
+            }
+
+            // Starts visible toggle
+            let vis_btn = ui
+                .add_enabled(
+                    active,
+                    egui::Button::new(if init_vis { "👁" } else { "🙈" }).small(),
+                )
+                .on_hover_text(if init_vis {
+                    "Starts visible\nClick to start hidden"
+                } else {
+                    "Starts hidden\nClick to start visible"
+                });
+            if vis_btn.clicked() {
+                *undo_needed = true;
+                self.project.widgets[idx].props.initially_visible = !init_vis;
+            }
+
+            let container_icon = if is_container { "📁 " } else { "📄 " };
+            let label_text = if active {
+                if init_vis {
+                    label.clone()
+                } else {
+                    format!("({label})")
+                }
+            } else {
+                format!("~~{label}~~")
+            };
+
+            let row = ui.selectable_label(
+                is_selected,
+                format!("⣿ {}{}", container_icon, label_text),
+            );
+
+            // Drag handle to reparent/reorder
+            if row.drag_started() {
+                self.layer_drag = Some(wid);
+            }
+
+            // Click to select
+            if row.clicked() {
+                let shift = ui.input(|i| i.modifiers.shift);
+                if shift {
+                    if is_selected {
+                        self.selected.retain(|&x| x != wid);
+                    } else {
+                        self.selected.push(wid);
+                    }
+                } else {
+                    self.selected = vec![wid];
+                }
+            }
+        });
+
+        // Hover drop target to nest inside container or reorder
+        if let Some(dragged_id) = self.layer_drag {
+            if dragged_id != wid && !self.project.is_descendant_of(wid, dragged_id) {
+                if row_resp.response.hovered() {
+                    ui.painter().rect_stroke(
+                        row_resp.response.rect,
+                        egui::CornerRadius::same(2),
+                        egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
+                        egui::StrokeKind::Outside,
+                    );
+                    if ui.input(|i| i.pointer.any_released()) {
+                        if is_container {
+                            // Drop onto a container nests it as a child!
+                            *reparent_action = Some((dragged_id, Some(wid)));
+                            *undo_needed = true;
+                        } else {
+                            // Drop onto a sibling adjusts z order
+                            let parent_of_target = self.project.widgets[idx].parent;
+                            *reparent_action = Some((dragged_id, parent_of_target));
+                            *z_reorder_action = Some((dragged_id, current_z + 1));
+                            *undo_needed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Render children indented
+        for child_id in children_ids {
+            self.render_layer_tree_node(
+                ui,
+                child_id,
+                depth + 1,
+                reparent_action,
+                z_reorder_action,
+                undo_needed,
+            );
+        }
     }
 
     fn inspector_ui(&mut self, ui: &mut egui::Ui) {
         let grid = self.grid_size; // read before mutably borrowing self
+        let Some(&sel_id) = self.selected.first() else {
+            ui.push_id("inspector_ui", |ui| {
+                ui.heading("Inspector");
+                ui.separator();
+                ui.weak("No selection");
+            });
+            return;
+        };
+
+        // Query parent information before borrowing self mutably
+        let current_parent = self
+            .project
+            .widgets
+            .iter()
+            .find(|x| x.id == sel_id)
+            .and_then(|x| x.parent);
+
+        let potential_parents: Vec<(WidgetId, String)> = self
+            .project
+            .widgets
+            .iter()
+            .filter(|pw| {
+                pw.id != sel_id
+                    && pw.kind.is_container()
+                    && !self.project.is_descendant_of(pw.id, sel_id)
+            })
+            .map(|pw| {
+                let name = if pw.props.name.is_empty() {
+                    pw.kind.display_name().to_string()
+                } else {
+                    pw.props.name.clone()
+                };
+                (pw.id, format!("{} (#{})", name, pw.id))
+            })
+            .collect();
+
+        let parent_label = match current_parent {
+            None => "(None - Root)".to_string(),
+            Some(pid) => {
+                if let Some(pw) = self.project.widgets.iter().find(|x| x.id == pid) {
+                    let name = if pw.props.name.is_empty() {
+                        pw.kind.display_name().to_string()
+                    } else {
+                        pw.props.name.clone()
+                    };
+                    format!("{} (#{})", name, pid)
+                } else {
+                    format!("#{}", pid)
+                }
+            }
+        };
+
+        let mut new_parent = current_parent;
+        let mut do_delete = false;
+
         ui.push_id("inspector_ui", |ui| {
             ui.heading("Inspector");
             ui.separator();
@@ -1843,6 +2210,20 @@ impl RadBuilderApp {
                     _ => {}
                 }
                 ui.separator();
+
+                // Parent container selection
+                ui.horizontal(|ui| {
+                    ui.label("Parent:");
+                    egui::ComboBox::from_id_salt(("parent_select", w.id))
+                        .selected_text(&parent_label)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut new_parent, None, "(None - Root)");
+                            for (pid, label) in &potential_parents {
+                                ui.selectable_value(&mut new_parent, Some(*pid), label);
+                            }
+                        });
+                });
+
                 ui.horizontal(|ui| {
                     ui.label("Area");
                     let mut area = w.area;
@@ -1889,14 +2270,20 @@ impl RadBuilderApp {
 
                 ui.add_space(6.0);
                 if ui.button("Delete").clicked() {
-                    let id = w.id; // capture
-                    self.project.widgets.retain(|w| w.id != id);
-                    self.selected.clear();
+                    do_delete = true;
                 }
             } else {
                 ui.weak("No selection");
             }
         });
+
+        if new_parent != current_parent {
+            self.push_undo();
+            self.reparent_widget(sel_id, new_parent);
+        }
+        if do_delete {
+            self.delete_selected();
+        }
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
@@ -2743,8 +3130,8 @@ impl RadBuilderApp {
         out.push_str("    }\n");
         out.push_str("}\n\n");
 
-        // helper macro to emit a widget block at rect (origin + local pos)
-        let emit_widget = |w: &Widget, out: &mut String, origin: &str| {
+        // helper function to emit a widget block at rect (origin + local pos) recursively
+        fn emit_widget(project: &Project, w: &Widget, out: &mut String, origin: &str) {
             if !w.props.active {
                 return;
             }
@@ -2940,9 +3327,19 @@ impl RadBuilderApp {
                 }
                 WidgetKind::CollapsingHeader => {
                     out.push_str(&format!(
-                        "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{ egui::CollapsingHeader::new(\"{}\").id_salt((\"collapsing_header\", {})).default_open(state.open_{}).show(ui, |ui| {{ ui.label(\"… place your inner content here …\"); }}); }});\n",
+                        "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{\n\
+                            egui::CollapsingHeader::new(\"{}\").id_salt((\"collapsing_header\", {})).default_open(state.open_{}).show(ui, |ui| {{\n",
                         pos.x, pos.y, size.x, size.y, escape(&w.props.text), w.id, w.id
                     ));
+                    let children = project.children_of(w.id);
+                    if children.is_empty() {
+                        out.push_str("                ui.label(\"… place your inner content here …\");\n");
+                    } else {
+                        for child in children {
+                            emit_widget(project, child, out, "ui.min_rect().min");
+                        }
+                    }
+                    out.push_str("            });\n    });\n");
                 }
                 WidgetKind::DatePicker => {
                     out.push_str(&format!(
@@ -3199,39 +3596,56 @@ impl RadBuilderApp {
                     let layout_fn = if w.props.horizontal { "horizontal" } else { "vertical" };
                     out.push_str(&format!(
                         "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(\
-                            {origin} + egui::vec2({x:.1},{y:.1}), egui::vec2({w:.1},{h:.1}))), |ui| {{ \
-                            egui::Frame::group(ui.style()).show(ui, |ui| {{ \
-                                ui.set_min_size(egui::vec2({iw:.1},{ih:.1})); \
-                                ui.{layout_fn}(|ui| {{ {title}/* group contents */ }}); \
-                            }}); \
-                        }});\n",
+                            {origin} + egui::vec2({x:.1},{y:.1}), egui::vec2({w:.1},{h:.1}))), |ui| {{\n\
+                            egui::Frame::group(ui.style()).show(ui, |ui| {{\n\
+                                ui.set_min_size(egui::vec2({iw:.1},{ih:.1}));\n\
+                                ui.{layout_fn}(|ui| {{\n\
+                                    {title}\n",
                         x = pos.x,
                         y = pos.y,
                         w = size.x,
                         h = size.y,
-                        iw = size.x - 12.0,
-                        ih = size.y - 12.0,
+                        iw = (size.x - 12.0).max(10.0),
+                        ih = (size.y - 12.0).max(10.0),
                         title = title_code,
                         layout_fn = layout_fn,
                     ));
+                    let children = project.children_of(w.id);
+                    if children.is_empty() {
+                        out.push_str("                    /* group contents */\n");
+                    } else {
+                        for child in children {
+                            emit_widget(project, child, out, "ui.min_rect().min");
+                        }
+                    }
+                    out.push_str("                });\n            });\n    });\n");
                 }
                 WidgetKind::ScrollBox => {
                     out.push_str(&format!(
                         "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(\
-                            {origin} + egui::vec2({x:.1},{y:.1}), egui::vec2({w:.1},{h:.1}))), |ui| {{ \
-                            egui::ScrollArea::both().id_salt((\"scroll_box\", {id})).max_width({sw:.1}).max_height({sh:.1}).auto_shrink([false,false]).show(ui, |ui| {{ \
-                                ui.label(\"{text}\"); \
-                            }}); \
-                        }});\n",
+                            {origin} + egui::vec2({x:.1},{y:.1}), egui::vec2({w:.1},{h:.1}))), |ui| {{\n\
+                            egui::ScrollArea::both().id_salt((\"scroll_box\", {id})).max_width({sw:.1}).max_height({sh:.1}).auto_shrink([false,false]).show(ui, |ui| {{\n",
                         x = pos.x,
                         y = pos.y,
                         w = size.x,
                         h = size.y,
                         id = w.id,
-                        sw = size.x - 4.0,
-                        sh = size.y - 4.0,
-                        text = escape(&w.props.text),
+                        sw = (size.x - 4.0).max(10.0),
+                        sh = (size.y - 4.0).max(10.0),
                     ));
+                    let children = project.children_of(w.id);
+                    if children.is_empty() {
+                        if !w.props.text.is_empty() {
+                            out.push_str(&format!("                ui.label(\"{}\");\n", escape(&w.props.text)));
+                        } else {
+                            out.push_str("                /* scroll area contents */\n");
+                        }
+                    } else {
+                        for child in children {
+                            emit_widget(project, child, out, "ui.min_rect().min");
+                        }
+                    }
+                    out.push_str("            });\n    });\n");
                 }
                 WidgetKind::TabBar => {
                     let tabs_code: String = w.props.items.iter().enumerate().map(|(i, tab)| {
@@ -3240,38 +3654,51 @@ impl RadBuilderApp {
                     }).collect();
                     out.push_str(&format!(
                         "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(\
-                            {origin} + egui::vec2({x:.1},{y:.1}), egui::vec2({w:.1},{h:.1}))), |ui| {{ \
-                            ui.horizontal(|ui| {{ {tabs} }}); \
-                        }});\n",
+                            {origin} + egui::vec2({x:.1},{y:.1}), egui::vec2({w:.1},{h:.1}))), |ui| {{\n\
+                            ui.horizontal(|ui| {{ {tabs} }});\n",
                         x = pos.x,
                         y = pos.y,
                         w = size.x,
                         h = size.y,
                         tabs = tabs_code,
                     ));
+                    let children = project.children_of(w.id);
+                    for child in children {
+                        emit_widget(project, child, out, "ui.min_rect().min");
+                    }
+                    out.push_str("    });\n");
                 }
                 WidgetKind::Columns => {
+                    let cols = w.props.columns.max(1);
                     out.push_str(&format!(
                         "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(\
-                            {origin} + egui::vec2({x:.1},{y:.1}), egui::vec2({w:.1},{h:.1}))), |ui| {{ \
-                            ui.columns({cols}, |columns| {{ \
-                                for col in columns.iter_mut() {{ col.label(\"{text}\"); }} \
-                            }}); \
-                        }});\n",
+                            {origin} + egui::vec2({x:.1},{y:.1}), egui::vec2({w:.1},{h:.1}))), |ui| {{\n\
+                            ui.columns({cols}, |columns| {{\n",
                         x = pos.x,
                         y = pos.y,
                         w = size.x,
                         h = size.y,
-                        cols = w.props.columns.max(1),
-                        text = escape(&w.props.text),
+                        cols = cols,
                     ));
+                    let children = project.children_of(w.id);
+                    if children.is_empty() {
+                        out.push_str(&format!(
+                            "                for col in columns.iter_mut() {{ col.label(\"{}\"); }}\n",
+                            escape(&w.props.text)
+                        ));
+                    } else {
+                        for (i, child) in children.into_iter().enumerate() {
+                            let col_idx = i % (cols as usize);
+                            out.push_str(&format!("                let ui = &mut columns[{}];\n", col_idx));
+                            emit_widget(project, child, out, "ui.min_rect().min");
+                        }
+                    }
+                    out.push_str("            });\n    });\n");
                 }
                 WidgetKind::Window => {
                     let title = escape(&w.props.text);
                     out.push_str(&format!(
-                        "    egui::Window::new(\"{title}\").default_pos({origin} + egui::vec2({x:.1},{y:.1})).default_size(egui::vec2({w:.1},{h:.1})).open(&mut state.window_{id}_open).show(ctx, |ui| {{ \
-                            /* window contents */ \
-                        }});\n",
+                        "    egui::Window::new(\"{title}\").default_pos({origin} + egui::vec2({x:.1},{y:.1})).default_size(egui::vec2({w:.1},{h:.1})).open(&mut state.window_{id}_open).show(ctx, |ui| {{\n",
                         title = title,
                         x = pos.x,
                         y = pos.y,
@@ -3279,6 +3706,15 @@ impl RadBuilderApp {
                         h = size.y,
                         id = w.id,
                     ));
+                    let children = project.children_of(w.id);
+                    if children.is_empty() {
+                        out.push_str("        /* window contents */\n");
+                    } else {
+                        for child in children {
+                            emit_widget(project, child, out, "ui.min_rect().min");
+                        }
+                    }
+                    out.push_str("    });\n");
                 }
             }
             out.push_str("    });\n");
@@ -3297,7 +3733,7 @@ impl RadBuilderApp {
             if needs_vis {
                 out.push_str("    }\n");
             }
-        };
+        }
 
         let mut top = Vec::new();
         let mut bottom = Vec::new();
@@ -3306,13 +3742,15 @@ impl RadBuilderApp {
         let mut center = Vec::new();
         let mut free = Vec::new();
         for w in &self.project.widgets {
-            match w.area {
-                Top => top.push(w),
-                Bottom => bottom.push(w),
-                Left => left.push(w),
-                Right => right.push(w),
-                Center => center.push(w),
-                Free => free.push(w),
+            if w.parent.is_none() {
+                match w.area {
+                    Top => top.push(w),
+                    Bottom => bottom.push(w),
+                    Left => left.push(w),
+                    Right => right.push(w),
+                    Center => center.push(w),
+                    Free => free.push(w),
+                }
             }
         }
 
@@ -3324,7 +3762,7 @@ impl RadBuilderApp {
         out.push_str("            .resizable(true)\n");
         out.push_str("            .show(ctx, |ui| {\n");
         for w in top {
-            emit_widget(w, &mut out, "ui.min_rect().min");
+            emit_widget(&self.project, w, &mut out, "ui.min_rect().min");
         }
         out.push_str("            });\n");
         out.push_str("    }\n");
@@ -3335,7 +3773,7 @@ impl RadBuilderApp {
         out.push_str("            .resizable(true)\n");
         out.push_str("            .show(ctx, |ui| {\n");
         for w in bottom {
-            emit_widget(w, &mut out, "ui.min_rect().min");
+            emit_widget(&self.project, w, &mut out, "ui.min_rect().min");
         }
         out.push_str("            });\n");
         out.push_str("    }\n");
@@ -3346,7 +3784,7 @@ impl RadBuilderApp {
         out.push_str("            .resizable(true)\n");
         out.push_str("            .show(ctx, |ui| {\n");
         for w in left {
-            emit_widget(w, &mut out, "ui.min_rect().min");
+            emit_widget(&self.project, w, &mut out, "ui.min_rect().min");
         }
         out.push_str("            });\n");
         out.push_str("    }\n");
@@ -3357,7 +3795,7 @@ impl RadBuilderApp {
         out.push_str("            .resizable(true)\n");
         out.push_str("            .show(ctx, |ui| {\n");
         for w in right {
-            emit_widget(w, &mut out, "ui.min_rect().min");
+            emit_widget(&self.project, w, &mut out, "ui.min_rect().min");
         }
         out.push_str("            });\n");
         out.push_str("    }\n");
@@ -3371,10 +3809,10 @@ impl RadBuilderApp {
 		));
         out.push_str("        let _ = ui.allocate_painter(canvas.size(), egui::Sense::hover());\n");
         for w in center {
-            emit_widget(w, &mut out, "canvas.min");
+            emit_widget(&self.project, w, &mut out, "canvas.min");
         }
         for w in free {
-            emit_widget(w, &mut out, "canvas.min");
+            emit_widget(&self.project, w, &mut out, "canvas.min");
         }
         out.push_str("    });\n");
 
