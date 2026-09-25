@@ -575,6 +575,7 @@ pub(crate) enum ActionEffect {
     CustomRustCode(String),
 }
 
+#[allow(dead_code)]
 impl ActionEffect {
     pub(crate) fn display_name(&self) -> &'static str {
         match self {
