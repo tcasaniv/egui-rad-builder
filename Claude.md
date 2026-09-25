@@ -502,6 +502,7 @@ Leverage `egui_dock` as an application template layer where generated RAD window
 7. ~~Add error handling with user feedback~~ ✅ Status message display
 8. **NEW:** Add `.on_hover_text()` tooltips throughout UI (egui best practice) ✅ Partial - menu items have tooltips
 9. ~~Layers panel with drag-and-drop reorder and display controls (Active, Starts Visible, Opacity)~~ ✅
+10. ~~Parent-child widget hierarchy with relative positioning, tree view, and recursive canvas/codegen~~ ✅
 
 ### Phase 3: Alignment & Selection *(Top Priority from Issue #15 + Mobius)* ✅ MOSTLY COMPLETE
 1. ~~Multi-select widgets (Shift+click)~~ ✅ Shift+click toggle selection
