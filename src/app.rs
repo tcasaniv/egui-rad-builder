@@ -8,12 +8,15 @@ use crate::{
     highlight::Highlighter,
     history::{History, HistorySnapshot},
     project::Project,
-    widget::{self, DockArea, Widget, WidgetId, WidgetKind, escape, snap_pos_with_grid},
+    widget::{
+        self, ActionEffect, ActionTrigger, DockArea, Widget, WidgetAction, WidgetId, WidgetKind,
+        escape, snap_pos_with_grid,
+    },
 };
 use chrono::{Datelike, NaiveDate};
 use egui::{Color32, CornerRadius, Id, Pos2, Rect, Sense, Stroke, UiBuilder, pos2, vec2};
 use egui_extras::DatePickerButton;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 /// Output shape used when generating Rust source from the current project.
@@ -243,6 +246,301 @@ mod tests {
             "child button should use relative origin ui.min_rect().min"
         );
     }
+
+    // ─── Action System ────────────────────────────────────────────────────────
+
+    /// Helper: build a minimal single-widget project, run generate_single_file, return code.
+    #[allow(dead_code)]
+    fn codegen_with_action(
+        kind: crate::widget::WidgetKind,
+        label: &str,
+        initially_visible: bool,
+        action: crate::widget::WidgetAction,
+    ) -> String {
+        let mut app = super::RadBuilderApp::default();
+        let w = crate::widget::Widget {
+            id: crate::widget::WidgetId::new(1),
+            kind,
+            pos: egui::pos2(10.0, 10.0),
+            size: egui::vec2(80.0, 24.0),
+            z: 1,
+            area: crate::widget::DockArea::Center,
+            props: crate::widget::WidgetProps {
+                text: label.into(),
+                initially_visible,
+                actions: vec![action],
+                ..Default::default()
+            },
+            parent: None,
+        };
+        app.project.widgets.push(w);
+        app.generate_single_file()
+    }
+
+    #[test]
+    fn test_live_apply_action_effects() {
+        use crate::widget::{ActionEffect, WidgetId, WidgetProps, WidgetKind, DockArea};
+        let mut widgets: Vec<crate::widget::Widget> = vec![
+            crate::widget::Widget {
+                id: WidgetId::new(10),
+                kind: WidgetKind::Label,
+                pos: egui::pos2(0.0, 0.0),
+                size: egui::vec2(100.0, 24.0),
+                z: 1,
+                area: DockArea::Center,
+                props: WidgetProps { initially_visible: true, ..Default::default() },
+                parent: None,
+            },
+        ];
+
+        // ShowWidget / HideWidget / ToggleWidget
+        super::RadBuilderApp::apply_action_effect(&ActionEffect::HideWidget(WidgetId::new(10)), &mut widgets);
+        assert!(!widgets[0].props.initially_visible, "HideWidget should set initially_visible=false");
+
+        super::RadBuilderApp::apply_action_effect(&ActionEffect::ShowWidget(WidgetId::new(10)), &mut widgets);
+        assert!(widgets[0].props.initially_visible, "ShowWidget should set initially_visible=true");
+
+        super::RadBuilderApp::apply_action_effect(&ActionEffect::ToggleWidget(WidgetId::new(10)), &mut widgets);
+        assert!(!widgets[0].props.initially_visible, "ToggleWidget should flip to false");
+
+        super::RadBuilderApp::apply_action_effect(&ActionEffect::ToggleWidget(WidgetId::new(10)), &mut widgets);
+        assert!(widgets[0].props.initially_visible, "ToggleWidget should flip back to true");
+
+        // SetText
+        super::RadBuilderApp::apply_action_effect(
+            &ActionEffect::SetText { target: WidgetId::new(10), text: "Hello".into() },
+            &mut widgets,
+        );
+        assert_eq!(widgets[0].props.text, "Hello", "SetText should update props.text");
+
+        // SwitchTab / OpenModal / CloseModal do not panic on unknown IDs
+        super::RadBuilderApp::apply_action_effect(&ActionEffect::SwitchTab { target: WidgetId::new(99), tab_index: 2 }, &mut widgets);
+        super::RadBuilderApp::apply_action_effect(&ActionEffect::OpenModal(WidgetId::new(99)), &mut widgets);
+        super::RadBuilderApp::apply_action_effect(&ActionEffect::CloseModal(WidgetId::new(99)), &mut widgets);
+    }
+
+    #[test]
+    fn test_codegen_button_click_toggle_widget() {
+        use crate::widget::{ActionEffect, ActionTrigger, WidgetAction, WidgetId, WidgetKind, WidgetProps, DockArea};
+
+        // Target widget that will be toggled (starts hidden)
+        let mut app = super::RadBuilderApp::default();
+        let target_id = WidgetId::new(2);
+        let btn_id = WidgetId::new(1);
+
+        let btn = crate::widget::Widget {
+            id: btn_id,
+            kind: WidgetKind::Button,
+            pos: egui::pos2(10.0, 10.0),
+            size: egui::vec2(80.0, 24.0),
+            z: 1,
+            area: DockArea::Center,
+            props: WidgetProps {
+                text: "ToggleBtn".into(),
+                actions: vec![WidgetAction {
+                    trigger: ActionTrigger::OnClick,
+                    effect: ActionEffect::ToggleWidget(target_id),
+                }],
+                ..Default::default()
+            },
+            parent: None,
+        };
+        let target = crate::widget::Widget {
+            id: target_id,
+            kind: WidgetKind::Label,
+            pos: egui::pos2(10.0, 50.0),
+            size: egui::vec2(80.0, 24.0),
+            z: 2,
+            area: DockArea::Center,
+            props: WidgetProps {
+                text: "Target".into(),
+                initially_visible: false,
+                ..Default::default()
+            },
+            parent: None,
+        };
+        app.project.widgets.push(btn);
+        app.project.widgets.push(target);
+
+        let code = app.generate_single_file();
+        assert!(code.contains("resp.clicked()"), "should emit resp.clicked() check");
+        assert!(
+            code.contains(&format!("state.show_{} = !state.show_{}", target_id, target_id)),
+            "should emit toggle expression"
+        );
+        assert!(
+            code.contains(&format!("show_{}: bool", target_id)),
+            "GeneratedState should have show_ field"
+        );
+    }
+
+    #[test]
+    fn test_codegen_button_click_switch_tab() {
+        use crate::widget::{ActionEffect, ActionTrigger, WidgetAction, WidgetId, WidgetKind, WidgetProps, DockArea};
+
+        let mut app = super::RadBuilderApp::default();
+        let tab_id = WidgetId::new(5);
+
+        let btn = crate::widget::Widget {
+            id: WidgetId::new(1),
+            kind: WidgetKind::Button,
+            pos: egui::pos2(10.0, 10.0),
+            size: egui::vec2(80.0, 24.0),
+            z: 1,
+            area: DockArea::Center,
+            props: WidgetProps {
+                text: "GoTab2".into(),
+                actions: vec![WidgetAction {
+                    trigger: ActionTrigger::OnClick,
+                    effect: ActionEffect::SwitchTab { target: tab_id, tab_index: 1 },
+                }],
+                ..Default::default()
+            },
+            parent: None,
+        };
+        app.project.widgets.push(btn);
+        let code = app.generate_single_file();
+        assert!(code.contains("resp.clicked()"), "should emit resp.clicked()");
+        assert!(
+            code.contains(&format!("state.tab_{} = 1", tab_id)),
+            "should emit tab switch"
+        );
+    }
+
+    #[test]
+    fn test_codegen_button_click_set_text() {
+        use crate::widget::{ActionEffect, ActionTrigger, WidgetAction, WidgetId, WidgetKind, WidgetProps, DockArea};
+
+        let mut app = super::RadBuilderApp::default();
+        let label_id = WidgetId::new(3);
+
+        let btn = crate::widget::Widget {
+            id: WidgetId::new(1),
+            kind: WidgetKind::Button,
+            pos: egui::pos2(10.0, 10.0),
+            size: egui::vec2(80.0, 24.0),
+            z: 1,
+            area: DockArea::Center,
+            props: WidgetProps {
+                text: "SetBtn".into(),
+                actions: vec![WidgetAction {
+                    trigger: ActionTrigger::OnClick,
+                    effect: ActionEffect::SetText { target: label_id, text: "Updated!".into() },
+                }],
+                ..Default::default()
+            },
+            parent: None,
+        };
+        let lbl = crate::widget::Widget {
+            id: label_id,
+            kind: WidgetKind::Label,
+            pos: egui::pos2(10.0, 50.0),
+            size: egui::vec2(100.0, 24.0),
+            z: 2,
+            area: DockArea::Center,
+            props: WidgetProps { text: "Original".into(), ..Default::default() },
+            parent: None,
+        };
+        app.project.widgets.push(btn);
+        app.project.widgets.push(lbl);
+
+        let code = app.generate_single_file();
+        assert!(code.contains("resp.clicked()"), "should emit resp.clicked()");
+        assert!(
+            code.contains(&format!("state.text_{} = \"Updated!\".to_owned()", label_id)),
+            "should emit SetText assignment"
+        );
+        // Label should use dynamic text expression
+        assert!(
+            code.contains(&format!("state.text_{}", label_id)),
+            "label should reference state.text_"
+        );
+    }
+
+    #[test]
+    fn test_codegen_modal_open_close() {
+        use crate::widget::{ActionEffect, ActionTrigger, WidgetAction, WidgetId, WidgetKind, WidgetProps, DockArea};
+
+        let mut app = super::RadBuilderApp::default();
+        let win_id = WidgetId::new(7);
+
+        let open_btn = crate::widget::Widget {
+            id: WidgetId::new(1),
+            kind: WidgetKind::Button,
+            pos: egui::pos2(10.0, 10.0),
+            size: egui::vec2(80.0, 24.0),
+            z: 1,
+            area: DockArea::Center,
+            props: WidgetProps {
+                text: "OpenWin".into(),
+                actions: vec![WidgetAction {
+                    trigger: ActionTrigger::OnClick,
+                    effect: ActionEffect::OpenModal(win_id),
+                }],
+                ..Default::default()
+            },
+            parent: None,
+        };
+        app.project.widgets.push(open_btn);
+
+        let code = app.generate_single_file();
+        assert!(code.contains("resp.clicked()"), "should emit resp.clicked()");
+        assert!(
+            code.contains(&format!("state.window_{}_open = true", win_id)),
+            "should emit window open"
+        );
+
+        // Now test CloseModal
+        let mut app2 = super::RadBuilderApp::default();
+        let close_btn = crate::widget::Widget {
+            id: WidgetId::new(2),
+            kind: WidgetKind::Button,
+            pos: egui::pos2(10.0, 10.0),
+            size: egui::vec2(80.0, 24.0),
+            z: 1,
+            area: DockArea::Center,
+            props: WidgetProps {
+                text: "CloseWin".into(),
+                actions: vec![WidgetAction {
+                    trigger: ActionTrigger::OnClick,
+                    effect: ActionEffect::CloseModal(win_id),
+                }],
+                ..Default::default()
+            },
+            parent: None,
+        };
+        app2.project.widgets.push(close_btn);
+        let code2 = app2.generate_single_file();
+        assert!(
+            code2.contains(&format!("state.window_{}_open = false", win_id)),
+            "should emit window close"
+        );
+    }
+}
+
+
+/// Draft state for the inspector's "+ Add Action" form.
+#[derive(Clone, Debug)]
+pub(crate) struct ActionDraft {
+    pub(crate) trigger: ActionTrigger,
+    pub(crate) effect_kind: usize,
+    pub(crate) target: Option<WidgetId>,
+    pub(crate) text: String,
+    pub(crate) tab: usize,
+    pub(crate) code: String,
+}
+
+impl Default for ActionDraft {
+    fn default() -> Self {
+        Self {
+            trigger: ActionTrigger::OnClick,
+            effect_kind: 0,
+            target: None,
+            text: String::new(),
+            tab: 0,
+            code: String::new(),
+        }
+    }
 }
 
 /// Interactive `eframe` application that owns the builder workspace.
@@ -297,6 +595,8 @@ pub struct RadBuilderApp {
     layer_drag: Option<WidgetId>,
     /// Undo and redo history manager
     history: History,
+    /// Draft state for configuring actions in the inspector
+    action_draft: ActionDraft,
 }
 
 impl Default for RadBuilderApp {
@@ -329,6 +629,7 @@ impl Default for RadBuilderApp {
             left_panel_tab: 0,
             layer_drag: None,
             history: History::default(),
+            action_draft: ActionDraft::default(),
         }
     }
 }
@@ -767,6 +1068,8 @@ impl RadBuilderApp {
             }
         }
 
+        let mut triggered_actions: Vec<ActionEffect> = Vec::new();
+
         // Top
         if self.project.panel_top_enabled {
             egui::TopBottomPanel::top("rb_top")
@@ -785,6 +1088,7 @@ impl RadBuilderApp {
                             &mut self.selected,
                             wid,
                             &mut self.project.widgets,
+                            &mut triggered_actions,
                         );
                     }
                 });
@@ -808,6 +1112,7 @@ impl RadBuilderApp {
                             &mut self.selected,
                             wid,
                             &mut self.project.widgets,
+                            &mut triggered_actions,
                         );
                     }
                 });
@@ -831,6 +1136,7 @@ impl RadBuilderApp {
                             &mut self.selected,
                             wid,
                             &mut self.project.widgets,
+                            &mut triggered_actions,
                         );
                     }
                 });
@@ -854,6 +1160,7 @@ impl RadBuilderApp {
                             &mut self.selected,
                             wid,
                             &mut self.project.widgets,
+                            &mut triggered_actions,
                         );
                     }
                 });
@@ -881,6 +1188,7 @@ impl RadBuilderApp {
                     &mut self.selected,
                     wid,
                     &mut self.project.widgets,
+                    &mut triggered_actions,
                 );
             }
             for wid in free_ids {
@@ -891,6 +1199,7 @@ impl RadBuilderApp {
                     &mut self.selected,
                     wid,
                     &mut self.project.widgets,
+                    &mut triggered_actions,
                 );
             }
 
@@ -943,6 +1252,11 @@ impl RadBuilderApp {
                 self.selected.clear();
             }
         });
+
+        // Apply any actions that were triggered during this frame
+        for effect in triggered_actions {
+            Self::apply_action_effect(&effect, &mut self.project.widgets);
+        }
     }
 
     fn draw_grid(&self, ui: &mut egui::Ui, rect: Rect) {
@@ -966,6 +1280,65 @@ impl RadBuilderApp {
         }
     }
 
+    pub(crate) fn apply_action_effect(effect: &ActionEffect, widgets: &mut [Widget]) {
+        match effect {
+            ActionEffect::ShowWidget(target) => {
+                if let Some(tw) = widgets.iter_mut().find(|w| w.id == *target) {
+                    tw.props.initially_visible = true;
+                }
+            }
+            ActionEffect::HideWidget(target) => {
+                if let Some(tw) = widgets.iter_mut().find(|w| w.id == *target) {
+                    tw.props.initially_visible = false;
+                }
+            }
+            ActionEffect::ToggleWidget(target) => {
+                if let Some(tw) = widgets.iter_mut().find(|w| w.id == *target) {
+                    tw.props.initially_visible = !tw.props.initially_visible;
+                }
+            }
+            ActionEffect::SetText { target, text } => {
+                if let Some(tw) = widgets.iter_mut().find(|w| w.id == *target) {
+                    tw.props.text = text.clone();
+                }
+            }
+            ActionEffect::SwitchTab { target, tab_index } => {
+                if let Some(tw) = widgets.iter_mut().find(|w| w.id == *target) {
+                    tw.props.selected = *tab_index;
+                }
+            }
+            ActionEffect::OpenModal(target) => {
+                if let Some(tw) = widgets.iter_mut().find(|w| w.id == *target) {
+                    tw.props.checked = true;
+                }
+            }
+            ActionEffect::CloseModal(target) => {
+                if let Some(tw) = widgets.iter_mut().find(|w| w.id == *target) {
+                    tw.props.checked = false;
+                }
+            }
+            ActionEffect::CustomRustCode(_) => {}
+        }
+    }
+
+    fn check_widget_actions(
+        resp: &egui::Response,
+        actions: &[WidgetAction],
+        triggered: &mut Vec<ActionEffect>,
+    ) {
+        for action in actions {
+            let fired = match action.trigger {
+                ActionTrigger::OnClick => resp.clicked(),
+                ActionTrigger::OnHover => resp.hovered(),
+                ActionTrigger::OnChanged => resp.changed(),
+                ActionTrigger::OnDoubleClick => resp.double_clicked(),
+            };
+            if fired {
+                triggered.push(action.effect.clone());
+            }
+        }
+    }
+
     fn draw_widget_tree(
         ui: &mut egui::Ui,
         container_rect: Rect,
@@ -973,14 +1346,29 @@ impl RadBuilderApp {
         selected: &mut Vec<WidgetId>,
         widget_id: WidgetId,
         widgets: &mut [Widget],
+        triggered: &mut Vec<ActionEffect>,
     ) {
         let idx = match widgets.iter().position(|w| w.id == widget_id) {
             Some(i) => i,
             None => return,
         };
 
+        let is_edit_mode = ui
+            .ctx()
+            .data(|d| d.get_temp::<bool>(Id::new("edit_mode")))
+            .unwrap_or(true);
+
         if !widgets[idx].props.active {
             return;
+        }
+
+        if !is_edit_mode {
+            if !widgets[idx].props.initially_visible {
+                return;
+            }
+            if widgets[idx].kind == WidgetKind::Window && !widgets[idx].props.checked {
+                return;
+            }
         }
 
         let is_container = widgets[idx].kind.is_container();
@@ -997,6 +1385,7 @@ impl RadBuilderApp {
                     selected,
                     &mut widgets[idx],
                     has_children,
+                    triggered,
                 );
             });
         } else {
@@ -1007,6 +1396,7 @@ impl RadBuilderApp {
                 selected,
                 &mut widgets[idx],
                 has_children,
+                triggered,
             );
         }
 
@@ -1027,7 +1417,7 @@ impl RadBuilderApp {
             children.sort_by_key(|&(_, z)| z);
 
             for (cid, _) in children {
-                Self::draw_widget_tree(ui, inner_rect, grid_size, selected, cid, widgets);
+                Self::draw_widget_tree(ui, inner_rect, grid_size, selected, cid, widgets, triggered);
             }
         }
     }
@@ -1039,7 +1429,12 @@ impl RadBuilderApp {
         selected: &mut Vec<WidgetId>,
         w: &mut Widget,
         has_children: bool,
+        triggered: &mut Vec<ActionEffect>,
     ) {
+        let is_edit_mode = ui
+            .ctx()
+            .data(|d| d.get_temp::<bool>(Id::new("edit_mode")))
+            .unwrap_or(true);
         let rect = Rect::from_min_size(canvas_rect.min + w.pos.to_vec2(), w.size);
         ui.push_id(("widget", w.id), |ui| {
             ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
@@ -1069,33 +1464,48 @@ impl RadBuilderApp {
                         });
                     }
                     WidgetKind::Button => {
-                        ui.add_sized(w.size, egui::Button::new(&w.props.text));
+                        let resp = ui.add_sized(w.size, egui::Button::new(&w.props.text));
+                        if !is_edit_mode {
+                            Self::check_widget_actions(&resp, &w.props.actions, triggered);
+                        }
                     }
                     WidgetKind::ImageTextButton => {
                         // We keep it simple: icon + text as the button label.
                         // Users can change `icon` to any emoji / short string.
                         let label = format!("{}  {}", w.props.icon, w.props.text);
-                        ui.add_sized(w.size, egui::Button::new(label));
+                        let resp = ui.add_sized(w.size, egui::Button::new(label));
+                        if !is_edit_mode {
+                            Self::check_widget_actions(&resp, &w.props.actions, triggered);
+                        }
                     }
                     WidgetKind::Checkbox => {
                         let mut checked = w.props.checked;
-                        ui.add_sized(w.size, egui::Checkbox::new(&mut checked, &w.props.text));
+                        let resp = ui.add_sized(w.size, egui::Checkbox::new(&mut checked, &w.props.text));
                         w.props.checked = checked;
+                        if !is_edit_mode {
+                            Self::check_widget_actions(&resp, &w.props.actions, triggered);
+                        }
                     }
                     WidgetKind::TextEdit => {
                         let mut buf = w.props.text.clone();
                         let resp = egui::TextEdit::singleline(&mut buf)
                             .id_salt(("text_edit", w.id))
                             .hint_text("text");
-                        ui.add_sized(w.size, resp);
+                        let r = ui.add_sized(w.size, resp);
                         w.props.text = buf;
+                        if !is_edit_mode {
+                            Self::check_widget_actions(&r, &w.props.actions, triggered);
+                        }
                     }
                     WidgetKind::Slider => {
                         let mut v = w.props.value;
                         let slider = egui::Slider::new(&mut v, w.props.min..=w.props.max)
                             .text(&w.props.text);
-                        ui.add_sized(w.size, slider);
+                        let resp = ui.add_sized(w.size, slider);
                         w.props.value = v;
+                        if !is_edit_mode {
+                            Self::check_widget_actions(&resp, &w.props.actions, triggered);
+                        }
                     }
                     WidgetKind::ProgressBar => {
                         let bar =
@@ -1114,20 +1524,27 @@ impl RadBuilderApp {
                         w.props.selected = sel;
                     }
                     WidgetKind::Link => {
-                        let _ = ui.link(&w.props.text);
+                        let resp = ui.link(&w.props.text);
+                        if !is_edit_mode {
+                            Self::check_widget_actions(&resp, &w.props.actions, triggered);
+                        }
                     }
                     WidgetKind::Hyperlink => {
-                        ui.hyperlink_to(&w.props.text, &w.props.url);
+                        let resp = ui.hyperlink_to(&w.props.text, &w.props.url);
+                        if !is_edit_mode {
+                            Self::check_widget_actions(&resp, &w.props.actions, triggered);
+                        }
                     }
                     WidgetKind::SelectableLabel => {
                         let mut on = w.props.checked;
-                        if ui
-                            .add(egui::Button::selectable(on, &w.props.text))
-                            .clicked()
-                        {
+                        let resp = ui.add(egui::Button::selectable(on, &w.props.text));
+                        if resp.clicked() {
                             on = !on;
                         }
                         w.props.checked = on;
+                        if !is_edit_mode {
+                            Self::check_widget_actions(&resp, &w.props.actions, triggered);
+                        }
                     }
                     WidgetKind::ComboBox => {
                         let items = if w.props.items.is_empty() {
@@ -1411,8 +1828,12 @@ impl RadBuilderApp {
                         ui.horizontal(|ui| {
                             for (i, item) in w.props.items.iter().enumerate() {
                                 let selected = i == w.props.selected;
-                                if ui.selectable_label(selected, item).clicked() {
+                                let resp = ui.selectable_label(selected, item);
+                                if resp.clicked() {
                                     w.props.selected = i;
+                                }
+                                if !is_edit_mode {
+                                    Self::check_widget_actions(&resp, &w.props.actions, triggered);
                                 }
                             }
                         });
@@ -1442,7 +1863,9 @@ impl RadBuilderApp {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            ui.small("✕");
+                                            if ui.small_button("✕").clicked() && !is_edit_mode {
+                                                w.props.checked = false;
+                                            }
                                         },
                                     );
                                 });
@@ -1454,12 +1877,23 @@ impl RadBuilderApp {
                         });
                     }
                 }
+
+                // General fallback: if this is a non-standard widget with actions, handle clicks/hovers
+                if !is_edit_mode && !w.props.actions.is_empty() && matches!(
+                    w.kind,
+                    WidgetKind::Label
+                        | WidgetKind::Heading
+                        | WidgetKind::Small
+                        | WidgetKind::Monospace
+                        | WidgetKind::Image
+                        | WidgetKind::Placeholder
+                        | WidgetKind::Group
+                ) {
+                    let resp = ui.interact(rect, ui.make_persistent_id(("action_interact", w.id)), Sense::click());
+                    Self::check_widget_actions(&resp, &w.props.actions, triggered);
+                }
             });
         });
-        let is_edit_mode = ui
-            .ctx()
-            .data(|d| d.get_temp::<bool>(Id::new("edit_mode")))
-            .unwrap_or(true);
         let painter = ui.painter();
         let is_selected = selected.contains(&w.id);
         let stroke = if is_selected {
@@ -1965,6 +2399,28 @@ impl RadBuilderApp {
             }
         };
 
+        let all_target_widgets: Vec<(WidgetId, String)> = self
+            .project
+            .widgets
+            .iter()
+            .map(|pw| {
+                let name = if pw.props.name.is_empty() {
+                    pw.kind.display_name().to_string()
+                } else {
+                    pw.props.name.clone()
+                };
+                (pw.id, format!("{} (#{})", name, pw.id))
+            })
+            .collect();
+
+        let target_widget_names: HashMap<WidgetId, String> =
+            all_target_widgets.iter().cloned().collect();
+
+        let mut action_draft = std::mem::take(&mut self.action_draft);
+        let mut action_to_add: Option<WidgetAction> = None;
+        let mut test_action: Option<ActionEffect> = None;
+        let mut undo_needed = false;
+
         let mut new_parent = current_parent;
         let mut do_delete = false;
 
@@ -2268,6 +2724,170 @@ impl RadBuilderApp {
                         .id_salt(("inspector_tooltip", w.id)),
                 );
 
+                ui.separator();
+                ui.label(egui::RichText::new("⚡ Actions").strong());
+
+                let mut remove_action_idx: Option<usize> = None;
+
+                if w.props.actions.is_empty() {
+                    ui.weak("No actions configured");
+                } else {
+                    for (i, act) in w.props.actions.iter().enumerate() {
+                        ui.horizontal(|ui| {
+                            let summary = match &act.effect {
+                                ActionEffect::ShowWidget(t) => {
+                                    let t_name = target_widget_names.get(t).map(|s| s.as_str()).unwrap_or("Unknown");
+                                    format!("Show {}", t_name)
+                                }
+                                ActionEffect::HideWidget(t) => {
+                                    let t_name = target_widget_names.get(t).map(|s| s.as_str()).unwrap_or("Unknown");
+                                    format!("Hide {}", t_name)
+                                }
+                                ActionEffect::ToggleWidget(t) => {
+                                    let t_name = target_widget_names.get(t).map(|s| s.as_str()).unwrap_or("Unknown");
+                                    format!("Toggle {}", t_name)
+                                }
+                                ActionEffect::SetText { target, text } => {
+                                    let t_name = target_widget_names.get(target).map(|s| s.as_str()).unwrap_or("Unknown");
+                                    format!("Set {} text = \"{}\"", t_name, text)
+                                }
+                                ActionEffect::SwitchTab { target, tab_index } => {
+                                    let t_name = target_widget_names.get(target).map(|s| s.as_str()).unwrap_or("Unknown");
+                                    format!("Switch {} tab = {}", t_name, tab_index)
+                                }
+                                ActionEffect::OpenModal(t) => {
+                                    let t_name = target_widget_names.get(t).map(|s| s.as_str()).unwrap_or("Unknown");
+                                    format!("Open {}", t_name)
+                                }
+                                ActionEffect::CloseModal(t) => {
+                                    let t_name = target_widget_names.get(t).map(|s| s.as_str()).unwrap_or("Unknown");
+                                    format!("Close {}", t_name)
+                                }
+                                ActionEffect::CustomRustCode(code) => {
+                                    let snippet = if code.len() > 15 {
+                                        format!("{}...", &code[..15])
+                                    } else {
+                                        code.clone()
+                                    };
+                                    format!("Code: {}", snippet)
+                                }
+                            };
+
+                            ui.label(format!("• [{}]: {}", act.trigger.display_name(), summary));
+                            if ui.small_button("⚡").on_hover_text("Test this action now").clicked() {
+                                test_action = Some(act.effect.clone());
+                            }
+                            if ui.small_button("❌").on_hover_text("Delete this action").clicked() {
+                                remove_action_idx = Some(i);
+                            }
+                        });
+                    }
+                }
+
+                if let Some(idx) = remove_action_idx {
+                    w.props.actions.remove(idx);
+                    undo_needed = true;
+                }
+
+                ui.add_space(2.0);
+                egui::CollapsingHeader::new("+ Add Action")
+                    .id_salt(("add_action_section", w.id))
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("Trigger:");
+                            egui::ComboBox::from_id_salt(("action_draft_trigger", w.id))
+                                .selected_text(action_draft.trigger.display_name())
+                                .show_ui(ui, |ui| {
+                                    for &trig in ActionTrigger::ALL {
+                                        ui.selectable_value(&mut action_draft.trigger, trig, trig.display_name());
+                                    }
+                                });
+                        });
+
+                        const EFFECT_LABELS: &[&str] = &[
+                            "Toggle Visibility",
+                            "Show Widget",
+                            "Hide Widget",
+                            "Set Text",
+                            "Switch Tab",
+                            "Open Window/Modal",
+                            "Close Window/Modal",
+                            "Custom Rust Code",
+                        ];
+
+                        ui.horizontal(|ui| {
+                            ui.label("Effect:");
+                            egui::ComboBox::from_id_salt(("action_draft_effect", w.id))
+                                .selected_text(EFFECT_LABELS[action_draft.effect_kind.min(EFFECT_LABELS.len() - 1)])
+                                .show_ui(ui, |ui| {
+                                    for (k, &name) in EFFECT_LABELS.iter().enumerate() {
+                                        ui.selectable_value(&mut action_draft.effect_kind, k, name);
+                                    }
+                                });
+                        });
+
+                        // Target selector for effects 0..=6
+                        if action_draft.effect_kind < 7 {
+                            let current_target_label = match action_draft.target {
+                                Some(tid) => target_widget_names.get(&tid).cloned().unwrap_or_else(|| format!("#{tid}")),
+                                None => "(Select Target)".to_string(),
+                            };
+                            ui.horizontal(|ui| {
+                                ui.label("Target:");
+                                egui::ComboBox::from_id_salt(("action_draft_target", w.id))
+                                    .selected_text(current_target_label)
+                                    .show_ui(ui, |ui| {
+                                        for (tid, label) in &all_target_widgets {
+                                            ui.selectable_value(&mut action_draft.target, Some(*tid), label);
+                                        }
+                                    });
+                            });
+                        }
+
+                        // Specific parameter inputs
+                        match action_draft.effect_kind {
+                            3 => {
+                                ui.horizontal(|ui| {
+                                    ui.label("Text:");
+                                    ui.text_edit_singleline(&mut action_draft.text);
+                                });
+                            }
+                            4 => {
+                                ui.horizontal(|ui| {
+                                    ui.label("Tab index:");
+                                    ui.add(egui::DragValue::new(&mut action_draft.tab).range(0..=50));
+                                });
+                            }
+                            7 => {
+                                ui.label("Rust code:");
+                                ui.text_edit_multiline(&mut action_draft.code);
+                            }
+                            _ => {}
+                        }
+
+                        if ui.button("Confirm Add Action").clicked() {
+                            let maybe_effect = match action_draft.effect_kind {
+                                0 => action_draft.target.map(ActionEffect::ToggleWidget),
+                                1 => action_draft.target.map(ActionEffect::ShowWidget),
+                                2 => action_draft.target.map(ActionEffect::HideWidget),
+                                3 => action_draft.target.map(|t| ActionEffect::SetText { target: t, text: action_draft.text.clone() }),
+                                4 => action_draft.target.map(|t| ActionEffect::SwitchTab { target: t, tab_index: action_draft.tab }),
+                                5 => action_draft.target.map(ActionEffect::OpenModal),
+                                6 => action_draft.target.map(ActionEffect::CloseModal),
+                                7 => Some(ActionEffect::CustomRustCode(action_draft.code.clone())),
+                                _ => None,
+                            };
+
+                            if let Some(effect) = maybe_effect {
+                                action_to_add = Some(WidgetAction {
+                                    trigger: action_draft.trigger,
+                                    effect,
+                                });
+                            }
+                        }
+                    });
+
                 ui.add_space(6.0);
                 if ui.button("Delete").clicked() {
                     do_delete = true;
@@ -2276,6 +2896,21 @@ impl RadBuilderApp {
                 ui.weak("No selection");
             }
         });
+
+        self.action_draft = action_draft;
+
+        if let Some(effect) = test_action {
+            Self::apply_action_effect(&effect, &mut self.project.widgets);
+        }
+        if let Some(act) = action_to_add {
+            self.push_undo();
+            if let Some(w) = self.selected_mut() {
+                w.props.actions.push(act);
+            }
+        }
+        if undo_needed {
+            self.push_undo();
+        }
 
         if new_parent != current_parent {
             self.push_undo();
@@ -2957,6 +3592,30 @@ impl RadBuilderApp {
             );
         }
 
+        let visibility_toggled_ids: HashSet<WidgetId> = self
+            .project
+            .widgets
+            .iter()
+            .flat_map(|w| &w.props.actions)
+            .filter_map(|a| match a.effect {
+                ActionEffect::ShowWidget(id)
+                | ActionEffect::HideWidget(id)
+                | ActionEffect::ToggleWidget(id) => Some(id),
+                _ => None,
+            })
+            .collect();
+
+        let text_updated_ids: HashSet<WidgetId> = self
+            .project
+            .widgets
+            .iter()
+            .flat_map(|w| &w.props.actions)
+            .filter_map(|a| match a.effect {
+                ActionEffect::SetText { target, .. } => Some(target),
+                _ => None,
+            })
+            .collect();
+
         out.push_str("struct GeneratedState {\n");
         out.push_str(
             "    enable_top: bool, enable_bottom: bool, enable_left: bool, enable_right: bool,\n",
@@ -2965,8 +3624,11 @@ impl RadBuilderApp {
             if !w.props.active {
                 continue;
             }
-            if !w.props.initially_visible {
+            if !w.props.initially_visible || visibility_toggled_ids.contains(&w.id) {
                 out.push_str(&format!("    show_{}: bool,\n", w.id));
+            }
+            if text_updated_ids.contains(&w.id) && w.kind != WidgetKind::TextEdit {
+                out.push_str(&format!("    text_{}: String,\n", w.id));
             }
             match w.kind {
                 WidgetKind::TextEdit => out.push_str(&format!("    text_{}: String,\n", w.id)),
@@ -2977,6 +3639,8 @@ impl RadBuilderApp {
                 WidgetKind::RadioGroup | WidgetKind::ComboBox | WidgetKind::MenuButton => {
                     out.push_str(&format!("    sel_{}: usize,\n", w.id))
                 }
+                WidgetKind::TabBar => out.push_str(&format!("    tab_{}: usize,\n", w.id)),
+                WidgetKind::Window => out.push_str(&format!("    window_{}_open: bool,\n", w.id)),
                 WidgetKind::CollapsingHeader => {
                     out.push_str(&format!("    open_{}: bool,\n", w.id))
                 }
@@ -3025,8 +3689,19 @@ impl RadBuilderApp {
             if !w.props.active {
                 continue;
             }
-            if !w.props.initially_visible {
-                out.push_str(&format!("            show_{}: false,\n", w.id));
+            if !w.props.initially_visible || visibility_toggled_ids.contains(&w.id) {
+                out.push_str(&format!(
+                    "            show_{}: {},\n",
+                    w.id,
+                    if w.props.initially_visible { "true" } else { "false" }
+                ));
+            }
+            if text_updated_ids.contains(&w.id) && w.kind != WidgetKind::TextEdit {
+                out.push_str(&format!(
+                    "            text_{}: \"{}\".to_owned(),\n",
+                    w.id,
+                    widget::escape(&w.props.text)
+                ));
             }
             match w.kind {
                 WidgetKind::TextEdit => {
@@ -3067,6 +3742,16 @@ impl RadBuilderApp {
                         w.props.selected.min(w.props.items.len() - 1)
                     };
                     out.push_str(&format!("            sel_{}: {},\n", w.id, sel));
+                }
+                WidgetKind::TabBar => {
+                    out.push_str(&format!("            tab_{}: {},\n", w.id, w.props.selected));
+                }
+                WidgetKind::Window => {
+                    out.push_str(&format!(
+                        "            window_{}_open: {},\n",
+                        w.id,
+                        if w.props.checked { "true" } else { "false" }
+                    ));
                 }
                 WidgetKind::CollapsingHeader => {
                     out.push_str(&format!(
@@ -3130,8 +3815,53 @@ impl RadBuilderApp {
         out.push_str("    }\n");
         out.push_str("}\n\n");
 
+        struct EmitCtx<'a> {
+            project: &'a Project,
+            visibility_toggled_ids: &'a HashSet<WidgetId>,
+            text_updated_ids: &'a HashSet<WidgetId>,
+        }
+
+        fn emit_actions(actions: &[WidgetAction], out: &mut String, resp_var: &str) {
+            for action in actions {
+                let trigger_check = match action.trigger {
+                    ActionTrigger::OnClick => format!("{resp_var}.clicked()"),
+                    ActionTrigger::OnHover => format!("{resp_var}.hovered()"),
+                    ActionTrigger::OnChanged => format!("{resp_var}.changed()"),
+                    ActionTrigger::OnDoubleClick => format!("{resp_var}.double_clicked()"),
+                };
+                out.push_str(&format!("        if {} {{\n", trigger_check));
+                match &action.effect {
+                    ActionEffect::ShowWidget(target) => {
+                        out.push_str(&format!("            state.show_{} = true;\n", target));
+                    }
+                    ActionEffect::HideWidget(target) => {
+                        out.push_str(&format!("            state.show_{} = false;\n", target));
+                    }
+                    ActionEffect::ToggleWidget(target) => {
+                        out.push_str(&format!("            state.show_{} = !state.show_{};\n", target, target));
+                    }
+                    ActionEffect::SetText { target, text } => {
+                        out.push_str(&format!("            state.text_{} = \"{}\".to_owned();\n", target, escape(text)));
+                    }
+                    ActionEffect::SwitchTab { target, tab_index } => {
+                        out.push_str(&format!("            state.tab_{} = {};\n", target, tab_index));
+                    }
+                    ActionEffect::OpenModal(target) => {
+                        out.push_str(&format!("            state.window_{}_open = true;\n", target));
+                    }
+                    ActionEffect::CloseModal(target) => {
+                        out.push_str(&format!("            state.window_{}_open = false;\n", target));
+                    }
+                    ActionEffect::CustomRustCode(code) => {
+                        out.push_str(&format!("            {}\n", code.trim()));
+                    }
+                }
+                out.push_str("        }\n");
+            }
+        }
+
         // helper function to emit a widget block at rect (origin + local pos) recursively
-        fn emit_widget(project: &Project, w: &Widget, out: &mut String, origin: &str) {
+        fn emit_widget(ctx: &EmitCtx, w: &Widget, out: &mut String, origin: &str) {
             if !w.props.active {
                 return;
             }
@@ -3139,14 +3869,15 @@ impl RadBuilderApp {
             let pos = w.pos;
             let size = w.size;
 
-            let needs_vis = !w.props.initially_visible;
+            let needs_vis = !w.props.initially_visible || ctx.visibility_toggled_ids.contains(&w.id);
             if needs_vis {
                 let name = if w.props.name.is_empty() {
                     w.kind.display_name().to_string()
                 } else {
                     w.props.name.clone()
                 };
-                out.push_str(&format!("    // {} (starts hidden)\n", escape(&name)));
+                let status = if w.props.initially_visible { "starts visible" } else { "starts hidden" };
+                out.push_str(&format!("    // {} ({})\n", escape(&name), status));
                 out.push_str(&format!("    if state.show_{} {{\n", w.id));
             }
 
@@ -3157,6 +3888,12 @@ impl RadBuilderApp {
                     w.props.opacity
                 ));
             }
+
+            let label_expr = if ctx.text_updated_ids.contains(&w.id) {
+                format!("&state.text_{}", w.id)
+            } else {
+                format!("\"{}\"", escape(&w.props.text))
+            };
 
             out.push_str(&format!("    ui.push_id((\"widget\", {}), |ui| {{\n", w.id));
             match w.kind {
@@ -3183,46 +3920,121 @@ impl RadBuilderApp {
 					out.push_str("        });\n");
 					out.push_str("    });\n");
 				}
-                WidgetKind::Label => out.push_str(&format!(
-                    "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{ ui.label(\"{}\"); }});\n",
-                    pos.x,pos.y,size.x,size.y,escape(&w.props.text)
-                )),
-                WidgetKind::Small => out.push_str(&format!(
-                    "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{ ui.small(\"{}\"); }});\n",
-                    pos.x,pos.y,size.x,size.y,escape(&w.props.text)
-                )),
-                WidgetKind::Monospace => out.push_str(&format!(
-                    "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{ ui.monospace(\"{}\"); }});\n",
-                    pos.x,pos.y,size.x,size.y,escape(&w.props.text)
-                )),
+                WidgetKind::Label => {
+                    if w.props.actions.is_empty() {
+                        out.push_str(&format!(
+                            "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{ ui.label({}); }});\n",
+                            pos.x, pos.y, size.x, size.y, label_expr
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{\n\
+                             \x20       let resp = ui.label({});\n",
+                            pos.x, pos.y, size.x, size.y, label_expr
+                        ));
+                        emit_actions(&w.props.actions, out, "resp");
+                        out.push_str("    });\n");
+                    }
+                }
+                WidgetKind::Small => {
+                    if w.props.actions.is_empty() {
+                        out.push_str(&format!(
+                            "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{ ui.small({}); }});\n",
+                            pos.x, pos.y, size.x, size.y, label_expr
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{\n\
+                             \x20       let resp = ui.small({});\n",
+                            pos.x, pos.y, size.x, size.y, label_expr
+                        ));
+                        emit_actions(&w.props.actions, out, "resp");
+                        out.push_str("    });\n");
+                    }
+                }
+                WidgetKind::Monospace => {
+                    if w.props.actions.is_empty() {
+                        out.push_str(&format!(
+                            "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{ ui.monospace({}); }});\n",
+                            pos.x, pos.y, size.x, size.y, label_expr
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{\n\
+                             \x20       let resp = ui.monospace({});\n",
+                            pos.x, pos.y, size.x, size.y, label_expr
+                        ));
+                        emit_actions(&w.props.actions, out, "resp");
+                        out.push_str("    });\n");
+                    }
+                }
                 WidgetKind::Button => {
-                    out.push_str(&format!(
-                        "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{ ui.add_sized(egui::vec2({:.1},{:.1}), egui::Button::new(\"{}\")); }});\n",
-                        pos.x, pos.y, size.x, size.y, size.x, size.y, escape(&w.props.text)
-                    ));
+                    if w.props.actions.is_empty() {
+                        out.push_str(&format!(
+                            "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{ ui.add_sized(egui::vec2({:.1},{:.1}), egui::Button::new({})); }});\n",
+                            pos.x, pos.y, size.x, size.y, size.x, size.y, label_expr
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{\n\
+                             \x20       let resp = ui.add_sized(egui::vec2({:.1},{:.1}), egui::Button::new({}));\n",
+                            pos.x, pos.y, size.x, size.y, size.x, size.y, label_expr
+                        ));
+                        emit_actions(&w.props.actions, out, "resp");
+                        out.push_str("    });\n");
+                    }
                 }
                 WidgetKind::ImageTextButton => {
-                    out.push_str(&format!(
-                        "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(\
-							{origin} + egui::vec2({x:.1},{y:.1}), \
-							egui::vec2({w:.1},{h:.1}))), |ui| {{ \
-							ui.add_sized(egui::vec2({w:.1},{h:.1}), \
-								egui::Button::new(format!(\"{{}}  {{}}\", \"{icon}\", \"{text}\")) \
-							); \
-						}});\n",
-                        x = pos.x,
-                        y = pos.y,
-                        w = size.x,
-                        h = size.y,
-                        icon = escape(&w.props.icon),
-                        text = escape(&w.props.text),
-                    ));
+                    if w.props.actions.is_empty() {
+                        out.push_str(&format!(
+                            "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(\
+                                {origin} + egui::vec2({x:.1},{y:.1}), \
+                                egui::vec2({w:.1},{h:.1}))), |ui| {{ \
+                                ui.add_sized(egui::vec2({w:.1},{h:.1}), \
+                                    egui::Button::new(format!(\"{{}}  {{}}\", \"{icon}\", {text})) \
+                                ); \
+                            }});\n",
+                            x = pos.x,
+                            y = pos.y,
+                            w = size.x,
+                            h = size.y,
+                            icon = escape(&w.props.icon),
+                            text = label_expr,
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(\
+                                {origin} + egui::vec2({x:.1},{y:.1}), \
+                                egui::vec2({w:.1},{h:.1}))), |ui| {{\n\
+                                let resp = ui.add_sized(egui::vec2({w:.1},{h:.1}), \
+                                    egui::Button::new(format!(\"{{}}  {{}}\", \"{icon}\", {text})) \
+                                );\n",
+                            x = pos.x,
+                            y = pos.y,
+                            w = size.x,
+                            h = size.y,
+                            icon = escape(&w.props.icon),
+                            text = label_expr,
+                        ));
+                        emit_actions(&w.props.actions, out, "resp");
+                        out.push_str("    });\n");
+                    }
                 }
                 WidgetKind::Checkbox => {
-                    out.push_str(&format!(
-                        "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{ ui.checkbox(&mut state.checked_{}, \"{}\"); }});\n",
-                        pos.x, pos.y, size.x, size.y, w.id, escape(&w.props.text)
-                    ));
+                    if w.props.actions.is_empty() {
+                        out.push_str(&format!(
+                            "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{ ui.checkbox(&mut state.checked_{}, \"{}\"); }});\n",
+                            pos.x, pos.y, size.x, size.y, w.id, escape(&w.props.text)
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{\n\
+                             \x20       let resp = ui.checkbox(&mut state.checked_{}, \"{}\");\n",
+                            pos.x, pos.y, size.x, size.y, w.id, escape(&w.props.text)
+                        ));
+                        emit_actions(&w.props.actions, out, "resp");
+                        out.push_str("    });\n");
+                    }
                 }
                 WidgetKind::TextEdit => {
                     out.push_str(&format!(
@@ -3231,10 +4043,20 @@ impl RadBuilderApp {
                     ));
                 }
                 WidgetKind::Slider => {
-                    out.push_str(&format!(
-                        "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{ ui.add_sized(egui::vec2({:.1},{:.1}), egui::Slider::new(&mut state.value_{}, {:.3}..={:.3}).text(\"{}\")); }});\n",
-                        pos.x, pos.y, size.x, size.y, size.x, size.y, w.id, w.props.min, w.props.max, escape(&w.props.text)
-                    ));
+                    if w.props.actions.is_empty() {
+                        out.push_str(&format!(
+                            "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{ ui.add_sized(egui::vec2({:.1},{:.1}), egui::Slider::new(&mut state.value_{}, {:.3}..={:.3}).text(\"{}\")); }});\n",
+                            pos.x, pos.y, size.x, size.y, size.x, size.y, w.id, w.props.min, w.props.max, escape(&w.props.text)
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{\n\
+                             \x20       let resp = ui.add_sized(egui::vec2({:.1},{:.1}), egui::Slider::new(&mut state.value_{}, {:.3}..={:.3}).text(\"{}\"));\n",
+                            pos.x, pos.y, size.x, size.y, size.x, size.y, w.id, w.props.min, w.props.max, escape(&w.props.text)
+                        ));
+                        emit_actions(&w.props.actions, out, "resp");
+                        out.push_str("    });\n");
+                    }
                 }
                 WidgetKind::ProgressBar => {
                     out.push_str(&format!(
@@ -3265,22 +4087,48 @@ impl RadBuilderApp {
                     out.push_str("    });\n");
                 }
                 WidgetKind::Link => {
-                    out.push_str(&format!(
-                        "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{ ui.link(\"{}\"); }});\n",
-                        pos.x, pos.y, size.x, size.y, escape(&w.props.text)
-                    ));
+                    if w.props.actions.is_empty() {
+                        out.push_str(&format!(
+                            "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{ ui.link(\"{}\"); }});\n",
+                            pos.x, pos.y, size.x, size.y, escape(&w.props.text)
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{\n\
+                             \x20       let resp = ui.link(\"{}\");\n",
+                            pos.x, pos.y, size.x, size.y, escape(&w.props.text)
+                        ));
+                        emit_actions(&w.props.actions, out, "resp");
+                        out.push_str("    });\n");
+                    }
                 }
                 WidgetKind::Hyperlink => {
-                    out.push_str(&format!(
-                        "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{ ui.hyperlink_to(\"{}\", \"{}\"); }});\n",
-                        pos.x, pos.y, size.x, size.y, escape(&w.props.text), escape(&w.props.url)
-                    ));
+                    if w.props.actions.is_empty() {
+                        out.push_str(&format!(
+                            "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{ ui.hyperlink_to(\"{}\", \"{}\"); }});\n",
+                            pos.x, pos.y, size.x, size.y, escape(&w.props.text), escape(&w.props.url)
+                        ));
+                    } else {
+                        out.push_str(&format!(
+                            "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{\n\
+                             \x20       let resp = ui.hyperlink_to(\"{}\", \"{}\");\n",
+                            pos.x, pos.y, size.x, size.y, escape(&w.props.text), escape(&w.props.url)
+                        ));
+                        emit_actions(&w.props.actions, out, "resp");
+                        out.push_str("    });\n");
+                    }
                 }
                 WidgetKind::SelectableLabel => {
                     out.push_str(&format!(
-                        "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{ if ui.add(egui::Button::selectable(state.sel_{}, \"{}\")).clicked() {{ state.sel_{} = !state.sel_{}; }} }});\n",
+                        "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size({origin} + egui::vec2({:.1},{:.1}), egui::vec2({:.1},{:.1}))), |ui| {{\n\
+                         \x20       let resp = ui.selectable_label(state.sel_{}, \"{}\");\n\
+                         \x20       if resp.clicked() {{ state.sel_{} = !state.sel_{}; }}\n",
                         pos.x, pos.y, size.x, size.y, w.id, escape(&w.props.text), w.id, w.id
                     ));
+                    if !w.props.actions.is_empty() {
+                        emit_actions(&w.props.actions, out, "resp");
+                    }
+                    out.push_str("    });\n");
                 }
                 WidgetKind::ComboBox => {
                     let items_code = if w.props.items.is_empty() {
@@ -3331,12 +4179,12 @@ impl RadBuilderApp {
                             egui::CollapsingHeader::new(\"{}\").id_salt((\"collapsing_header\", {})).default_open(state.open_{}).show(ui, |ui| {{\n",
                         pos.x, pos.y, size.x, size.y, escape(&w.props.text), w.id, w.id
                     ));
-                    let children = project.children_of(w.id);
+                    let children = ctx.project.children_of(w.id);
                     if children.is_empty() {
                         out.push_str("                ui.label(\"… place your inner content here …\");\n");
                     } else {
                         for child in children {
-                            emit_widget(project, child, out, "ui.min_rect().min");
+                            emit_widget(ctx, child, out, "ui.min_rect().min");
                         }
                     }
                     out.push_str("            });\n    });\n");
@@ -3610,12 +4458,12 @@ impl RadBuilderApp {
                         title = title_code,
                         layout_fn = layout_fn,
                     ));
-                    let children = project.children_of(w.id);
+                    let children = ctx.project.children_of(w.id);
                     if children.is_empty() {
                         out.push_str("                    /* group contents */\n");
                     } else {
                         for child in children {
-                            emit_widget(project, child, out, "ui.min_rect().min");
+                            emit_widget(ctx, child, out, "ui.min_rect().min");
                         }
                     }
                     out.push_str("                });\n            });\n    });\n");
@@ -3633,7 +4481,7 @@ impl RadBuilderApp {
                         sw = (size.x - 4.0).max(10.0),
                         sh = (size.y - 4.0).max(10.0),
                     ));
-                    let children = project.children_of(w.id);
+                    let children = ctx.project.children_of(w.id);
                     if children.is_empty() {
                         if !w.props.text.is_empty() {
                             out.push_str(&format!("                ui.label(\"{}\");\n", escape(&w.props.text)));
@@ -3642,7 +4490,7 @@ impl RadBuilderApp {
                         }
                     } else {
                         for child in children {
-                            emit_widget(project, child, out, "ui.min_rect().min");
+                            emit_widget(ctx, child, out, "ui.min_rect().min");
                         }
                     }
                     out.push_str("            });\n    });\n");
@@ -3662,9 +4510,9 @@ impl RadBuilderApp {
                         h = size.y,
                         tabs = tabs_code,
                     ));
-                    let children = project.children_of(w.id);
+                    let children = ctx.project.children_of(w.id);
                     for child in children {
-                        emit_widget(project, child, out, "ui.min_rect().min");
+                        emit_widget(ctx, child, out, "ui.min_rect().min");
                     }
                     out.push_str("    });\n");
                 }
@@ -3680,7 +4528,7 @@ impl RadBuilderApp {
                         h = size.y,
                         cols = cols,
                     ));
-                    let children = project.children_of(w.id);
+                    let children = ctx.project.children_of(w.id);
                     if children.is_empty() {
                         out.push_str(&format!(
                             "                for col in columns.iter_mut() {{ col.label(\"{}\"); }}\n",
@@ -3690,7 +4538,7 @@ impl RadBuilderApp {
                         for (i, child) in children.into_iter().enumerate() {
                             let col_idx = i % (cols as usize);
                             out.push_str(&format!("                let ui = &mut columns[{}];\n", col_idx));
-                            emit_widget(project, child, out, "ui.min_rect().min");
+                            emit_widget(ctx, child, out, "ui.min_rect().min");
                         }
                     }
                     out.push_str("            });\n    });\n");
@@ -3706,12 +4554,12 @@ impl RadBuilderApp {
                         h = size.y,
                         id = w.id,
                     ));
-                    let children = project.children_of(w.id);
+                    let children = ctx.project.children_of(w.id);
                     if children.is_empty() {
                         out.push_str("        /* window contents */\n");
                     } else {
                         for child in children {
-                            emit_widget(project, child, out, "ui.min_rect().min");
+                            emit_widget(ctx, child, out, "ui.min_rect().min");
                         }
                     }
                     out.push_str("    });\n");
@@ -3734,6 +4582,12 @@ impl RadBuilderApp {
                 out.push_str("    }\n");
             }
         }
+
+        let emit_ctx = EmitCtx {
+            project: &self.project,
+            visibility_toggled_ids: &visibility_toggled_ids,
+            text_updated_ids: &text_updated_ids,
+        };
 
         let mut top = Vec::new();
         let mut bottom = Vec::new();
@@ -3762,7 +4616,7 @@ impl RadBuilderApp {
         out.push_str("            .resizable(true)\n");
         out.push_str("            .show(ctx, |ui| {\n");
         for w in top {
-            emit_widget(&self.project, w, &mut out, "ui.min_rect().min");
+            emit_widget(&emit_ctx, w, &mut out, "ui.min_rect().min");
         }
         out.push_str("            });\n");
         out.push_str("    }\n");
@@ -3773,7 +4627,7 @@ impl RadBuilderApp {
         out.push_str("            .resizable(true)\n");
         out.push_str("            .show(ctx, |ui| {\n");
         for w in bottom {
-            emit_widget(&self.project, w, &mut out, "ui.min_rect().min");
+            emit_widget(&emit_ctx, w, &mut out, "ui.min_rect().min");
         }
         out.push_str("            });\n");
         out.push_str("    }\n");
@@ -3784,7 +4638,7 @@ impl RadBuilderApp {
         out.push_str("            .resizable(true)\n");
         out.push_str("            .show(ctx, |ui| {\n");
         for w in left {
-            emit_widget(&self.project, w, &mut out, "ui.min_rect().min");
+            emit_widget(&emit_ctx, w, &mut out, "ui.min_rect().min");
         }
         out.push_str("            });\n");
         out.push_str("    }\n");
@@ -3795,7 +4649,7 @@ impl RadBuilderApp {
         out.push_str("            .resizable(true)\n");
         out.push_str("            .show(ctx, |ui| {\n");
         for w in right {
-            emit_widget(&self.project, w, &mut out, "ui.min_rect().min");
+            emit_widget(&emit_ctx, w, &mut out, "ui.min_rect().min");
         }
         out.push_str("            });\n");
         out.push_str("    }\n");
@@ -3809,10 +4663,10 @@ impl RadBuilderApp {
 		));
         out.push_str("        let _ = ui.allocate_painter(canvas.size(), egui::Sense::hover());\n");
         for w in center {
-            emit_widget(&self.project, w, &mut out, "canvas.min");
+            emit_widget(&emit_ctx, w, &mut out, "canvas.min");
         }
         for w in free {
-            emit_widget(&self.project, w, &mut out, "canvas.min");
+            emit_widget(&emit_ctx, w, &mut out, "canvas.min");
         }
         out.push_str("    });\n");
 

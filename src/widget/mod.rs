@@ -529,6 +529,88 @@ impl WidgetKind {
     }
 }
 
+/// Trigger event that initiates a widget action.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum ActionTrigger {
+    OnClick,
+    OnHover,
+    OnChanged,
+    OnDoubleClick,
+}
+
+impl ActionTrigger {
+    pub(crate) fn display_name(&self) -> &'static str {
+        match self {
+            Self::OnClick => "On Click",
+            Self::OnHover => "On Hover",
+            Self::OnChanged => "On Changed",
+            Self::OnDoubleClick => "On Double Click",
+        }
+    }
+
+    pub(crate) const ALL: &'static [ActionTrigger] = &[
+        Self::OnClick,
+        Self::OnHover,
+        Self::OnChanged,
+        Self::OnDoubleClick,
+    ];
+}
+
+/// Effect performed when an action trigger fires.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) enum ActionEffect {
+    ShowWidget(WidgetId),
+    HideWidget(WidgetId),
+    ToggleWidget(WidgetId),
+    SetText {
+        target: WidgetId,
+        text: String,
+    },
+    SwitchTab {
+        target: WidgetId,
+        tab_index: usize,
+    },
+    OpenModal(WidgetId),
+    CloseModal(WidgetId),
+    CustomRustCode(String),
+}
+
+#[allow(dead_code)]
+impl ActionEffect {
+    pub(crate) fn display_name(&self) -> &'static str {
+        match self {
+            Self::ShowWidget(_) => "Show Widget",
+            Self::HideWidget(_) => "Hide Widget",
+            Self::ToggleWidget(_) => "Toggle Visibility",
+            Self::SetText { .. } => "Set Text",
+            Self::SwitchTab { .. } => "Switch Tab",
+            Self::OpenModal(_) => "Open Window/Modal",
+            Self::CloseModal(_) => "Close Window/Modal",
+            Self::CustomRustCode(_) => "Custom Rust Code",
+        }
+    }
+
+    pub(crate) fn target_widget(&self) -> Option<WidgetId> {
+        match self {
+            Self::ShowWidget(id)
+            | Self::HideWidget(id)
+            | Self::ToggleWidget(id)
+            | Self::SetText { target: id, .. }
+            | Self::SwitchTab { target: id, .. }
+            | Self::OpenModal(id)
+            | Self::CloseModal(id) => Some(*id),
+            Self::CustomRustCode(_) => None,
+        }
+    }
+}
+
+/// An interactive action binding a trigger to an effect.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct WidgetAction {
+    pub(crate) trigger: ActionTrigger,
+    pub(crate) effect: ActionEffect,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct WidgetProps {
     pub(crate) text: String,  // label/button/textedit placeholder
@@ -581,6 +663,10 @@ pub(crate) struct WidgetProps {
     /// via `ui.scope(|ui| { ui.set_opacity(x); … })`.
     #[serde(default = "widget_prop_default_opacity")]
     pub(crate) opacity: f32,
+
+    /// Interactive actions defined on this widget.
+    #[serde(default)]
+    pub(crate) actions: Vec<WidgetAction>,
 }
 
 fn widget_prop_default_true() -> bool {
@@ -615,6 +701,7 @@ impl Default for WidgetProps {
             active: true,
             initially_visible: true,
             opacity: 1.0,
+            actions: Vec::new(),
         }
     }
 }
@@ -969,5 +1056,47 @@ mod tests {
         assert_eq!(desc.len(), 2);
         assert!(desc.contains(&WidgetId::new(2)));
         assert!(desc.contains(&WidgetId::new(3)));
+    }
+
+    #[test]
+    fn test_widget_action_serde_round_trip() {
+        let action = WidgetAction {
+            trigger: ActionTrigger::OnClick,
+            effect: ActionEffect::ToggleWidget(WidgetId::new(42)),
+        };
+
+        let json = serde_json::to_string(&action).unwrap();
+        let deserialized: WidgetAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(action, deserialized);
+        assert_eq!(deserialized.trigger.display_name(), "On Click");
+        assert_eq!(deserialized.effect.display_name(), "Toggle Visibility");
+        assert_eq!(deserialized.effect.target_widget(), Some(WidgetId::new(42)));
+    }
+
+    #[test]
+    fn test_widget_props_actions_serde_backward_compat() {
+        // Old JSON without actions field
+        let json = r#"{
+            "text": "ClickMe",
+            "checked": false,
+            "value": 0.0,
+            "min": 0.0,
+            "max": 100.0,
+            "items": [],
+            "selected": 0,
+            "url": "",
+            "year": 2025,
+            "month": 1,
+            "day": 1,
+            "icon": "",
+            "color": [255, 255, 255, 255],
+            "tooltip": "",
+            "horizontal": false,
+            "enabled": true,
+            "columns": 1
+        }"#;
+
+        let props: WidgetProps = serde_json::from_str(json).unwrap();
+        assert!(props.actions.is_empty());
     }
 }
