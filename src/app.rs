@@ -264,7 +264,11 @@ impl RadBuilderApp {
     fn delete_selected(&mut self) {
         if !self.selected.is_empty() {
             self.push_undo();
-            let to_delete: Vec<_> = self.selected.clone();
+            let mut to_delete = Vec::new();
+            for &sel_id in &self.selected {
+                to_delete.push(sel_id);
+                to_delete.extend(self.project.get_descendants(sel_id));
+            }
             self.project.widgets.retain(|w| !to_delete.contains(&w.id));
             self.selected.clear();
         }
@@ -1460,151 +1464,296 @@ impl RadBuilderApp {
         ui.push_id("layers_ui", |ui| {
             ui.heading("Layers");
             ui.separator();
-            ui.label("Manage, reorder, and toggle widgets");
+            ui.label("Hierarchy, reordering, and visibility");
             ui.add_space(4.0);
 
-            let ordered: Vec<WidgetId> = {
-                let mut v: Vec<(WidgetId, i32)> =
-                    self.project.widgets.iter().map(|w| (w.id, w.z)).collect();
-                v.sort_by_key(|&(_, z)| std::cmp::Reverse(z));
-                v.into_iter().map(|(id, _)| id).collect()
-            };
+            let mut reparent_action: Option<(WidgetId, Option<WidgetId>)> = None;
+            let mut z_reorder_action: Option<(WidgetId, i32)> = None;
+            let mut undo_needed = false;
 
             egui::ScrollArea::vertical()
                 .id_salt("layers_scroll")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    let mut drop_target: Option<usize> = None;
-
-                    for (pos, &wid) in ordered.iter().enumerate() {
-                        if self.layer_drag.is_some() {
-                            let drop_zone = ui.allocate_rect(
-                                egui::Rect::from_min_size(
-                                    ui.cursor().min,
-                                    egui::vec2(ui.available_width(), 4.0),
-                                ),
-                                egui::Sense::hover(),
-                            );
-                            if drop_zone.hovered() {
-                                drop_target = Some(pos);
-                                ui.painter().hline(
-                                    drop_zone.rect.x_range(),
-                                    drop_zone.rect.center().y,
-                                    egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
-                                );
-                            }
-                        }
-
-                        let Some(idx) = self.project.widgets.iter().position(|w| w.id == wid)
-                        else {
-                            continue;
-                        };
-
-                        let is_selected = self.selected.contains(&wid);
-                        let (label, active, init_vis) = {
-                            let w = &self.project.widgets[idx];
-                            let n = if w.props.name.is_empty() {
-                                w.kind.display_name().to_string()
-                            } else {
-                                w.props.name.clone()
-                            };
-                            (n, w.props.active, w.props.initially_visible)
-                        };
-
-                        ui.horizontal(|ui| {
-                            let active_btn = ui
-                                .small_button(if active { "✅" } else { "🚫" })
-                                .on_hover_text(if active {
-                                    "Active (included in canvas & codegen)\nClick to deactivate"
-                                } else {
-                                    "Inactive (excluded from canvas & codegen)\nClick to activate"
-                                });
-                            if active_btn.clicked() {
-                                self.push_undo();
-                                self.project.widgets[idx].props.active = !active;
-                            }
-
-                            let vis_btn = ui
-                                .add_enabled(
-                                    active,
-                                    egui::Button::new(if init_vis { "👁" } else { "🙈" }).small(),
-                                )
-                                .on_hover_text(if init_vis {
-                                    "Starts visible\nClick to start hidden"
-                                } else {
-                                    "Starts hidden\nClick to start visible"
-                                });
-                            if vis_btn.clicked() {
-                                self.push_undo();
-                                self.project.widgets[idx].props.initially_visible = !init_vis;
-                            }
-
-                            let label_text = if active {
-                                if init_vis {
-                                    label.clone()
-                                } else {
-                                    format!("({label})")
-                                }
-                            } else {
-                                format!("~~{label}~~")
-                            };
-
-                            let row = ui.selectable_label(is_selected, format!("⣿ {label_text}"));
-                            if row.drag_started() {
-                                self.layer_drag = Some(wid);
-                            }
-                            if row.clicked() {
-                                let shift = ui.input(|i| i.modifiers.shift);
-                                if shift {
-                                    if is_selected {
-                                        self.selected.retain(|&x| x != wid);
-                                    } else {
-                                        self.selected.push(wid);
-                                    }
-                                } else {
-                                    self.selected = vec![wid];
-                                }
-                            }
-                        });
+                    if self.project.widgets.is_empty() {
+                        ui.label("No widgets yet.\nDrag from 🎨 Palette to add one.");
+                        return;
                     }
 
-                    if self.layer_drag.is_some() {
-                        let dz = ui.allocate_rect(
+                    // Top drop zone: drop here to unparent to Root
+                    if let Some(dragged_id) = self.layer_drag {
+                        let top_zone = ui.allocate_rect(
                             egui::Rect::from_min_size(
                                 ui.cursor().min,
-                                egui::vec2(ui.available_width(), 4.0),
+                                egui::vec2(ui.available_width(), 6.0),
                             ),
                             egui::Sense::hover(),
                         );
-                        if dz.hovered() {
-                            drop_target = Some(ordered.len());
-                        }
-                    }
-
-                    if self.project.widgets.is_empty() {
-                        ui.label("No widgets yet.\nDrag from 🎨 Palette to add one.");
-                    }
-
-                    if ui.input(|i| i.pointer.any_released()) {
-                        if let Some(src_id) = self.layer_drag.take() {
-                            if let Some(target) = drop_target {
-                                self.push_undo();
-                                let total = ordered.len() as i32;
-                                let new_z = total - target as i32;
-                                if let Some(w) =
-                                    self.project.widgets.iter_mut().find(|w| w.id == src_id)
-                                {
-                                    w.z = new_z;
-                                }
+                        if top_zone.hovered() {
+                            ui.painter().hline(
+                                top_zone.rect.x_range(),
+                                top_zone.rect.center().y,
+                                egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
+                            );
+                            if ui.input(|i| i.pointer.any_released()) {
+                                reparent_action = Some((dragged_id, None));
+                                undo_needed = true;
                             }
                         }
                     }
+
+                    // Render tree recursively starting from root widgets (parent == None)
+                    let root_ids: Vec<WidgetId> = {
+                        let mut roots: Vec<(WidgetId, i32)> = self
+                            .project
+                            .widgets
+                            .iter()
+                            .filter(|w| w.parent.is_none())
+                            .map(|w| (w.id, w.z))
+                            .collect();
+                        roots.sort_by_key(|&(_, z)| std::cmp::Reverse(z));
+                        roots.into_iter().map(|(id, _)| id).collect()
+                    };
+
+                    for &wid in &root_ids {
+                        self.render_layer_tree_node(
+                            ui,
+                            wid,
+                            0,
+                            &mut reparent_action,
+                            &mut z_reorder_action,
+                            &mut undo_needed,
+                        );
+                    }
+
+                    // Clear drag state if mouse released anywhere
+                    if ui.input(|i| i.pointer.any_released()) {
+                        self.layer_drag = None;
+                    }
                 });
+
+            if undo_needed {
+                self.push_undo();
+            }
+            if let Some((child_id, new_parent)) = reparent_action {
+                if let Some(w) = self.project.widgets.iter_mut().find(|w| w.id == child_id) {
+                    w.parent = new_parent;
+                }
+            }
+            if let Some((src_id, new_z)) = z_reorder_action {
+                if let Some(w) = self.project.widgets.iter_mut().find(|w| w.id == src_id) {
+                    w.z = new_z;
+                }
+            }
         });
+    }
+
+    fn render_layer_tree_node(
+        &mut self,
+        ui: &mut egui::Ui,
+        wid: WidgetId,
+        depth: usize,
+        reparent_action: &mut Option<(WidgetId, Option<WidgetId>)>,
+        z_reorder_action: &mut Option<(WidgetId, i32)>,
+        undo_needed: &mut bool,
+    ) {
+        let Some(idx) = self.project.widgets.iter().position(|w| w.id == wid) else {
+            return;
+        };
+
+        let is_selected = self.selected.contains(&wid);
+        let is_container = self.project.widgets[idx].kind.is_container();
+        let (label, active, init_vis, current_z) = {
+            let w = &self.project.widgets[idx];
+            let n = if w.props.name.is_empty() {
+                w.kind.display_name().to_string()
+            } else {
+                w.props.name.clone()
+            };
+            (n, w.props.active, w.props.initially_visible, w.z)
+        };
+
+        let children_ids: Vec<WidgetId> = {
+            let mut list: Vec<(WidgetId, i32)> = self
+                .project
+                .widgets
+                .iter()
+                .filter(|w| w.parent == Some(wid))
+                .map(|w| (w.id, w.z))
+                .collect();
+            list.sort_by_key(|&(_, z)| std::cmp::Reverse(z));
+            list.into_iter().map(|(id, _)| id).collect()
+        };
+
+        let row_resp = ui.horizontal(|ui| {
+            // Indentation
+            if depth > 0 {
+                ui.add_space((depth as f32) * 16.0);
+                ui.label("↳");
+            }
+
+            // Active toggle
+            let active_btn = ui
+                .small_button(if active { "✅" } else { "🚫" })
+                .on_hover_text(if active {
+                    "Active (in canvas & codegen)\nClick to deactivate"
+                } else {
+                    "Inactive (excluded from canvas & codegen)\nClick to activate"
+                });
+            if active_btn.clicked() {
+                *undo_needed = true;
+                self.project.widgets[idx].props.active = !active;
+            }
+
+            // Starts visible toggle
+            let vis_btn = ui
+                .add_enabled(
+                    active,
+                    egui::Button::new(if init_vis { "👁" } else { "🙈" }).small(),
+                )
+                .on_hover_text(if init_vis {
+                    "Starts visible\nClick to start hidden"
+                } else {
+                    "Starts hidden\nClick to start visible"
+                });
+            if vis_btn.clicked() {
+                *undo_needed = true;
+                self.project.widgets[idx].props.initially_visible = !init_vis;
+            }
+
+            let container_icon = if is_container { "📁 " } else { "📄 " };
+            let label_text = if active {
+                if init_vis {
+                    label.clone()
+                } else {
+                    format!("({label})")
+                }
+            } else {
+                format!("~~{label}~~")
+            };
+
+            let row = ui.selectable_label(
+                is_selected,
+                format!("⣿ {}{}", container_icon, label_text),
+            );
+
+            // Drag handle to reparent/reorder
+            if row.drag_started() {
+                self.layer_drag = Some(wid);
+            }
+
+            // Click to select
+            if row.clicked() {
+                let shift = ui.input(|i| i.modifiers.shift);
+                if shift {
+                    if is_selected {
+                        self.selected.retain(|&x| x != wid);
+                    } else {
+                        self.selected.push(wid);
+                    }
+                } else {
+                    self.selected = vec![wid];
+                }
+            }
+        });
+
+        // Hover drop target to nest inside container or reorder
+        if let Some(dragged_id) = self.layer_drag {
+            if dragged_id != wid && !self.project.is_descendant_of(wid, dragged_id) {
+                if row_resp.response.hovered() {
+                    ui.painter().rect_stroke(
+                        row_resp.response.rect,
+                        egui::CornerRadius::same(2),
+                        egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
+                        egui::StrokeKind::Outside,
+                    );
+                    if ui.input(|i| i.pointer.any_released()) {
+                        if is_container {
+                            // Drop onto a container nests it as a child!
+                            *reparent_action = Some((dragged_id, Some(wid)));
+                            *undo_needed = true;
+                        } else {
+                            // Drop onto a sibling adjusts z order
+                            let parent_of_target = self.project.widgets[idx].parent;
+                            *reparent_action = Some((dragged_id, parent_of_target));
+                            *z_reorder_action = Some((dragged_id, current_z + 1));
+                            *undo_needed = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Render children indented
+        for child_id in children_ids {
+            self.render_layer_tree_node(
+                ui,
+                child_id,
+                depth + 1,
+                reparent_action,
+                z_reorder_action,
+                undo_needed,
+            );
+        }
     }
 
     fn inspector_ui(&mut self, ui: &mut egui::Ui) {
         let grid = self.grid_size; // read before mutably borrowing self
+        let Some(&sel_id) = self.selected.first() else {
+            ui.push_id("inspector_ui", |ui| {
+                ui.heading("Inspector");
+                ui.separator();
+                ui.weak("No selection");
+            });
+            return;
+        };
+
+        // Query parent information before borrowing self mutably
+        let current_parent = self
+            .project
+            .widgets
+            .iter()
+            .find(|x| x.id == sel_id)
+            .and_then(|x| x.parent);
+
+        let potential_parents: Vec<(WidgetId, String)> = self
+            .project
+            .widgets
+            .iter()
+            .filter(|pw| {
+                pw.id != sel_id
+                    && pw.kind.is_container()
+                    && !self.project.is_descendant_of(pw.id, sel_id)
+            })
+            .map(|pw| {
+                let name = if pw.props.name.is_empty() {
+                    pw.kind.display_name().to_string()
+                } else {
+                    pw.props.name.clone()
+                };
+                (pw.id, format!("{} (#{})", name, pw.id))
+            })
+            .collect();
+
+        let parent_label = match current_parent {
+            None => "(None - Root)".to_string(),
+            Some(pid) => {
+                if let Some(pw) = self.project.widgets.iter().find(|x| x.id == pid) {
+                    let name = if pw.props.name.is_empty() {
+                        pw.kind.display_name().to_string()
+                    } else {
+                        pw.props.name.clone()
+                    };
+                    format!("{} (#{})", name, pid)
+                } else {
+                    format!("#{}", pid)
+                }
+            }
+        };
+
+        let mut new_parent = current_parent;
+        let mut do_delete = false;
+
         ui.push_id("inspector_ui", |ui| {
             ui.heading("Inspector");
             ui.separator();
@@ -1847,6 +1996,20 @@ impl RadBuilderApp {
                     _ => {}
                 }
                 ui.separator();
+
+                // Parent container selection
+                ui.horizontal(|ui| {
+                    ui.label("Parent:");
+                    egui::ComboBox::from_id_salt(("parent_select", w.id))
+                        .selected_text(&parent_label)
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut new_parent, None, "(None - Root)");
+                            for (pid, label) in &potential_parents {
+                                ui.selectable_value(&mut new_parent, Some(*pid), label);
+                            }
+                        });
+                });
+
                 ui.horizontal(|ui| {
                     ui.label("Area");
                     let mut area = w.area;
@@ -1893,14 +2056,22 @@ impl RadBuilderApp {
 
                 ui.add_space(6.0);
                 if ui.button("Delete").clicked() {
-                    let id = w.id; // capture
-                    self.project.widgets.retain(|w| w.id != id);
-                    self.selected.clear();
+                    do_delete = true;
                 }
             } else {
                 ui.weak("No selection");
             }
         });
+
+        if new_parent != current_parent {
+            self.push_undo();
+            if let Some(w_mut) = self.project.widgets.iter_mut().find(|x| x.id == sel_id) {
+                w_mut.parent = new_parent;
+            }
+        }
+        if do_delete {
+            self.delete_selected();
+        }
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
