@@ -7,10 +7,11 @@
 use crate::{
     highlight::Highlighter,
     history::{History, HistorySnapshot},
-    project::Project,
+    project::{Project, ScreenPreset},
     widget::{
-        self, ActionEffect, ActionTrigger, Align, DockArea, Justify, LayoutMode, SizePolicy,
-        Widget, WidgetAction, WidgetId, WidgetKind, escape, snap_pos_with_grid,
+        self, ActionEffect, ActionTrigger, Align, DockArea, Justify, LayoutMode,
+        ResponsiveLayout, ResponsiveVisibility, SizePolicy, Widget, WidgetAction, WidgetId,
+        WidgetKind, escape, snap_pos_with_grid,
     },
 };
 use chrono::{Datelike, NaiveDate};
@@ -3256,6 +3257,12 @@ impl RadBuilderApp {
             .map(|pw| pw.props.layout_mode)
             .unwrap_or(LayoutMode::Free);
 
+        let parent_tab_items: Vec<String> = current_parent
+            .and_then(|pid| self.project.widgets.iter().find(|x| x.id == pid))
+            .filter(|pw| pw.kind == WidgetKind::TabBar)
+            .map(|pw| pw.props.items.clone())
+            .unwrap_or_default();
+
         let all_target_widgets: Vec<(WidgetId, String)> = self
             .project
             .widgets
@@ -3537,6 +3544,28 @@ impl RadBuilderApp {
                         });
                 });
 
+                // Assigned Tab Page (when parent is a TabBar)
+                if !parent_tab_items.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.label("Assigned Tab:");
+                        let current_tab_label = match w.props.tab_page {
+                            None => "All Tabs".to_string(),
+                            Some(idx) => parent_tab_items
+                                .get(idx)
+                                .map(|s| format!("Tab {}: {}", idx + 1, s))
+                                .unwrap_or_else(|| format!("Tab {}", idx + 1)),
+                        };
+                        egui::ComboBox::from_id_salt(("tab_page_select", w.id))
+                            .selected_text(current_tab_label)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut w.props.tab_page, None, "All Tabs (visible on any tab)");
+                                for (i, it) in parent_tab_items.iter().enumerate() {
+                                    ui.selectable_value(&mut w.props.tab_page, Some(i), format!("Tab {}: {}", i + 1, it));
+                                }
+                            });
+                    });
+                }
+
                 ui.horizontal(|ui| {
                     ui.label("Area");
                     let mut area = w.area;
@@ -3572,6 +3601,20 @@ impl RadBuilderApp {
                             .show_ui(ui, |ui| {
                                 for m in LayoutMode::all() {
                                     ui.selectable_value(&mut w.props.layout_mode, *m, m.display_name());
+                                }
+                            });
+                    });
+
+                    ui.checkbox(&mut w.props.auto_size_y, "Auto height (hug content)")
+                        .on_hover_text("Automatically adjusts container height to encompass all child widgets");
+
+                    ui.horizontal(|ui| {
+                        ui.label("Adaptive layout:");
+                        egui::ComboBox::from_id_salt(("container_responsive_layout", w.id))
+                            .selected_text(w.props.responsive_layout.display_name())
+                            .show_ui(ui, |ui| {
+                                for rl in ResponsiveLayout::all() {
+                                    ui.selectable_value(&mut w.props.responsive_layout, *rl, rl.display_name());
                                 }
                             });
                     });
@@ -3762,6 +3805,19 @@ impl RadBuilderApp {
                         ui.add(egui::DragValue::new(&mut w.size.y).range(12.0..=2000.0));
                     });
                 }
+
+                ui.separator();
+                ui.label(egui::RichText::new("📱 Responsive").strong());
+                ui.horizontal(|ui| {
+                    ui.label("Visibility:");
+                    egui::ComboBox::from_id_salt(("widget_responsive_vis", w.id))
+                        .selected_text(w.props.responsive_vis.display_name())
+                        .show_ui(ui, |ui| {
+                            for rv in ResponsiveVisibility::all() {
+                                ui.selectable_value(&mut w.props.responsive_vis, *rv, rv.display_name());
+                            }
+                        });
+                });
 
                 ui.separator();
                 ui.label("Tooltip (optional)");
@@ -4315,6 +4371,29 @@ impl RadBuilderApp {
                 );
                 });
             });
+
+            ui.separator();
+            ui.push_id("menu_device_presets", |ui| {
+                ui.menu_button(self.project.screen_preset.display_name(), |ui| {
+                    for preset in ScreenPreset::all() {
+                        let selected = self.project.screen_preset == *preset;
+                        if ui.selectable_label(selected, preset.display_name()).clicked() {
+                            self.project.screen_preset = *preset;
+                            if let Some(dim) = preset.dimensions() {
+                                self.project.canvas_size = dim;
+                            }
+                            ui.close_kind(egui::UiKind::Menu);
+                        }
+                    }
+                });
+            });
+
+            if ui.button("🔄").on_hover_text("Rotate screen orientation (swap width <-> height)").clicked() {
+                let temp = self.project.canvas_size.x;
+                self.project.canvas_size.x = self.project.canvas_size.y;
+                self.project.canvas_size.y = temp;
+                self.project.screen_preset = ScreenPreset::Custom;
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Generate Code").on_hover_text("Ctrl+G").clicked() {
