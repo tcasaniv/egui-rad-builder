@@ -852,6 +852,52 @@ mod tests {
     }
 
     #[test]
+    fn test_tiny_group_and_window_do_not_panic() {
+        // Regression test for: "Negative width makes no sense" panic when auto-layout
+        // assigns a size smaller than the widget border offsets (12px Group, 16px Window).
+        // This can happen when a Fill-policy Group is inside a WrapRow container that
+        // becomes very narrow, causing cw.size to be overwritten with a tiny value.
+        use crate::widget::{DockArea, WidgetId, WidgetKind, WidgetProps};
+
+        let mut app = super::RadBuilderApp::default();
+        app.project.canvas_size = egui::Vec2::new(30.0, 30.0);
+
+        // Group with 8px size: 8 - 12 = -4 would have panicked before the fix
+        app.project.widgets.push(crate::widget::Widget {
+            id: WidgetId::new(9001),
+            kind: WidgetKind::Group,
+            pos: egui::pos2(0.0, 0.0),
+            size: egui::vec2(8.0, 8.0),
+            z: 1,
+            area: DockArea::Center,
+            props: WidgetProps { text: String::new(), active: true, ..WidgetProps::default() },
+            parent: None,
+        });
+
+        // Window with 10px size: 10 - 16 = -6 would have panicked before the fix
+        app.project.widgets.push(crate::widget::Widget {
+            id: WidgetId::new(9002),
+            kind: WidgetKind::Window,
+            pos: egui::pos2(0.0, 0.0),
+            size: egui::vec2(10.0, 10.0),
+            z: 2,
+            area: DockArea::Center,
+            props: WidgetProps { text: "T".to_string(), active: true, ..WidgetProps::default() },
+            parent: None,
+        });
+
+        let ctx = egui::Context::default();
+        // Must not panic in any of 10 simulated frames
+        for _ in 0..10 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                app.preview_panels_ui(ctx);
+            });
+        }
+        let code = app.generate_single_file();
+        assert!(!code.is_empty());
+    }
+
+    #[test]
     fn test_platform_info() {
         let info = super::RadBuilderApp::platform_info();
         assert!(!info.is_empty(), "platform info must not be empty");
@@ -2005,7 +2051,7 @@ impl RadBuilderApp {
                         }
                     };
 
-                    results.push((cid, Rect::from_min_size(pos2(current_x, y), vec2(w, h))));
+                    results.push((cid, Rect::from_min_size(pos2(current_x, y), vec2(w.max(1.0), h.max(1.0)))));
                     current_x += w + gap_stride;
                 }
             }
@@ -2088,7 +2134,7 @@ impl RadBuilderApp {
                         }
                     };
 
-                    results.push((cid, Rect::from_min_size(pos2(x, current_y), vec2(w, h))));
+                    results.push((cid, Rect::from_min_size(pos2(x, current_y), vec2(w.max(1.0), h.max(1.0)))));
                     current_y += h + gap_stride;
                 }
             }
@@ -2115,7 +2161,7 @@ impl RadBuilderApp {
                         row_h = 0.0;
                     }
 
-                    results.push((cid, Rect::from_min_size(pos2(current_x, current_y), vec2(w, h))));
+                    results.push((cid, Rect::from_min_size(pos2(current_x, current_y), vec2(w.max(1.0), h.max(1.0)))));
                     current_x += w + gap;
                     row_h = row_h.max(h);
                 }
@@ -2143,7 +2189,7 @@ impl RadBuilderApp {
                     };
 
                     let cell_x = pad_left + (col_idx as f32) * (cell_w + gap);
-                    results.push((cid, Rect::from_min_size(pos2(cell_x, row_y), vec2(w, h))));
+                    results.push((cid, Rect::from_min_size(pos2(cell_x, row_y), vec2(w.max(1.0), h.max(1.0)))));
 
                     current_row_max_h = current_row_max_h.max(h);
                     col_idx += 1;
@@ -2319,7 +2365,7 @@ impl RadBuilderApp {
                         rel_rect.size(),
                     );
                     if let Some(cw) = widgets.iter_mut().find(|x| x.id == cid) {
-                        cw.size = rel_rect.size();
+                        cw.size = rel_rect.size().max(egui::Vec2::splat(1.0));
                     }
                     Self::draw_widget_tree(ui, child_container_rect, grid_size, selected, cid, widgets, triggered);
                 }
@@ -2697,7 +2743,7 @@ impl RadBuilderApp {
                     }
                     WidgetKind::Group => {
                         egui::Frame::group(ui.style()).show(ui, |ui| {
-                            ui.set_min_size(w.size - vec2(12.0, 12.0));
+                            ui.set_min_size((w.size - vec2(12.0, 12.0)).max(egui::Vec2::ZERO));
                             let add_contents = |ui: &mut egui::Ui| {
                                 if !w.props.text.is_empty() {
                                     ui.strong(&w.props.text);
@@ -2721,8 +2767,8 @@ impl RadBuilderApp {
                             .show(ui, |ui| {
                                 egui::ScrollArea::both()
                                     .id_salt(("scroll_box", w.id))
-                                    .max_width(w.size.x - 4.0)
-                                    .max_height(w.size.y - 4.0)
+                                    .max_width((w.size.x - 4.0).max(0.0))
+                                    .max_height((w.size.y - 4.0).max(0.0))
                                     .auto_shrink([false, false])
                                     .show(ui, |ui| {
                                         if !w.props.text.is_empty() {
@@ -2765,7 +2811,7 @@ impl RadBuilderApp {
                     }
                     WidgetKind::Window => {
                         egui::Frame::window(ui.style()).show(ui, |ui| {
-                            ui.set_min_size(w.size - vec2(16.0, 16.0));
+                            ui.set_min_size((w.size - vec2(16.0, 16.0)).max(egui::Vec2::ZERO));
                             ui.vertical(|ui| {
                                 ui.horizontal(|ui| {
                                     ui.strong(&w.props.text);
