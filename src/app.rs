@@ -9,8 +9,8 @@ use crate::{
     history::{History, HistorySnapshot},
     project::Project,
     widget::{
-        self, ActionEffect, ActionTrigger, DockArea, Widget, WidgetAction, WidgetId, WidgetKind,
-        escape, snap_pos_with_grid,
+        self, ActionEffect, ActionTrigger, Align, DockArea, Justify, LayoutMode, SizePolicy,
+        Widget, WidgetAction, WidgetId, WidgetKind, escape, snap_pos_with_grid,
     },
 };
 use chrono::{Datelike, NaiveDate};
@@ -2770,6 +2770,11 @@ impl RadBuilderApp {
             }
         };
 
+        let parent_layout_mode = current_parent
+            .and_then(|pid| self.project.widgets.iter().find(|x| x.id == pid))
+            .map(|pw| pw.props.layout_mode)
+            .unwrap_or(LayoutMode::Free);
+
         let all_target_widgets: Vec<(WidgetId, String)> = self
             .project
             .widgets
@@ -3074,19 +3079,208 @@ impl RadBuilderApp {
                         w.pos = snap_pos_with_grid(w.pos, grid);
                     }
                 });
-                ui.label("Position / Size");
-                ui.horizontal(|ui| {
-                    ui.label("x");
-                    ui.add(egui::DragValue::new(&mut w.pos.x));
-                    ui.label("y");
-                    ui.add(egui::DragValue::new(&mut w.pos.y));
-                });
-                ui.horizontal(|ui| {
-                    ui.label("w");
-                    ui.add(egui::DragValue::new(&mut w.size.x).range(16.0..=2000.0));
-                    ui.label("h");
-                    ui.add(egui::DragValue::new(&mut w.size.y).range(12.0..=2000.0));
-                });
+
+                // ── Container Layout Settings ──────────────────────────────────
+                if w.kind.is_container() {
+                    ui.separator();
+                    ui.label(egui::RichText::new("📐 Container Layout").strong());
+                    ui.horizontal(|ui| {
+                        ui.label("Mode:");
+                        egui::ComboBox::from_id_salt(("container_layout_mode", w.id))
+                            .selected_text(w.props.layout_mode.display_name())
+                            .show_ui(ui, |ui| {
+                                for m in LayoutMode::all() {
+                                    ui.selectable_value(&mut w.props.layout_mode, *m, m.display_name());
+                                }
+                            });
+                    });
+
+                    if w.props.layout_mode != LayoutMode::Free {
+                        ui.horizontal(|ui| {
+                            ui.label("Gap:");
+                            ui.add(egui::DragValue::new(&mut w.props.layout_gap).range(0.0..=100.0).suffix(" px"));
+                        });
+
+                        if w.props.layout_mode == LayoutMode::Grid {
+                            ui.horizontal(|ui| {
+                                ui.label("Columns:");
+                                ui.add(egui::DragValue::new(&mut w.props.layout_cols).range(1..=12));
+                            });
+                        }
+
+                        if matches!(w.props.layout_mode, LayoutMode::Row | LayoutMode::Column) {
+                            ui.horizontal(|ui| {
+                                ui.label("Align items:");
+                                egui::ComboBox::from_id_salt(("container_layout_align", w.id))
+                                    .selected_text(w.props.layout_align.display_name())
+                                    .show_ui(ui, |ui| {
+                                        for a in Align::all() {
+                                            ui.selectable_value(&mut w.props.layout_align, *a, a.display_name());
+                                        }
+                                    });
+                            });
+
+                            ui.horizontal(|ui| {
+                                ui.label("Justify content:");
+                                egui::ComboBox::from_id_salt(("container_layout_justify", w.id))
+                                    .selected_text(w.props.layout_justify.display_name())
+                                    .show_ui(ui, |ui| {
+                                        for j in Justify::all() {
+                                            ui.selectable_value(&mut w.props.layout_justify, *j, j.display_name());
+                                        }
+                                    });
+                            });
+                        }
+
+                        ui.collapsing("Padding (T, R, B, L)", |ui| {
+                            ui.horizontal(|ui| {
+                                ui.label("Top:");
+                                ui.add(egui::DragValue::new(&mut w.props.layout_padding[0]).range(0.0..=100.0));
+                                ui.label("Right:");
+                                ui.add(egui::DragValue::new(&mut w.props.layout_padding[1]).range(0.0..=100.0));
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label("Bottom:");
+                                ui.add(egui::DragValue::new(&mut w.props.layout_padding[2]).range(0.0..=100.0));
+                                ui.label("Left:");
+                                ui.add(egui::DragValue::new(&mut w.props.layout_padding[3]).range(0.0..=100.0));
+                            });
+                        });
+                    }
+                }
+
+                // ── Position / Size ──────────────────────────────────────────
+                ui.separator();
+                let parent_has_auto_layout = parent_layout_mode != LayoutMode::Free;
+
+                if parent_has_auto_layout {
+                    ui.label(egui::RichText::new("Position: Auto-managed by parent").italics().weak());
+                    ui.label(egui::RichText::new("Size Policy").strong());
+
+                    // Width Policy
+                    ui.horizontal(|ui| {
+                        ui.label("Width:");
+                        let mut w_kind = match w.props.width_policy {
+                            SizePolicy::Fixed => 0,
+                            SizePolicy::Percent(_) => 1,
+                            SizePolicy::Fill => 2,
+                        };
+                        egui::ComboBox::from_id_salt(("width_policy_combo", w.id))
+                            .selected_text(match w_kind {
+                                0 => "Fixed",
+                                1 => "Percent",
+                                _ => "Fill",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut w_kind, 0, "Fixed (px)");
+                                ui.selectable_value(&mut w_kind, 1, "Percent (%)");
+                                ui.selectable_value(&mut w_kind, 2, "Fill");
+                            });
+
+                        match w_kind {
+                            0 => {
+                                if !matches!(w.props.width_policy, SizePolicy::Fixed) {
+                                    w.props.width_policy = SizePolicy::Fixed;
+                                }
+                                ui.add(egui::DragValue::new(&mut w.size.x).range(8.0..=2000.0).suffix(" px"));
+                            }
+                            1 => {
+                                let mut pct = match w.props.width_policy {
+                                    SizePolicy::Percent(p) => p,
+                                    _ => 100.0,
+                                };
+                                if ui.add(egui::DragValue::new(&mut pct).range(1.0..=100.0).suffix(" %")).changed() || !matches!(w.props.width_policy, SizePolicy::Percent(_)) {
+                                    w.props.width_policy = SizePolicy::Percent(pct);
+                                }
+                            }
+                            2 => {
+                                if !matches!(w.props.width_policy, SizePolicy::Fill) {
+                                    w.props.width_policy = SizePolicy::Fill;
+                                }
+                                ui.label("(fills remaining space)");
+                            }
+                            _ => {}
+                        }
+                    });
+
+                    // Height Policy
+                    ui.horizontal(|ui| {
+                        ui.label("Height:");
+                        let mut h_kind = match w.props.height_policy {
+                            SizePolicy::Fixed => 0,
+                            SizePolicy::Percent(_) => 1,
+                            SizePolicy::Fill => 2,
+                        };
+                        egui::ComboBox::from_id_salt(("height_policy_combo", w.id))
+                            .selected_text(match h_kind {
+                                0 => "Fixed",
+                                1 => "Percent",
+                                _ => "Fill",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut h_kind, 0, "Fixed (px)");
+                                ui.selectable_value(&mut h_kind, 1, "Percent (%)");
+                                ui.selectable_value(&mut h_kind, 2, "Fill");
+                            });
+
+                        match h_kind {
+                            0 => {
+                                if !matches!(w.props.height_policy, SizePolicy::Fixed) {
+                                    w.props.height_policy = SizePolicy::Fixed;
+                                }
+                                ui.add(egui::DragValue::new(&mut w.size.y).range(8.0..=2000.0).suffix(" px"));
+                            }
+                            1 => {
+                                let mut pct = match w.props.height_policy {
+                                    SizePolicy::Percent(p) => p,
+                                    _ => 100.0,
+                                };
+                                if ui.add(egui::DragValue::new(&mut pct).range(1.0..=100.0).suffix(" %")).changed() || !matches!(w.props.height_policy, SizePolicy::Percent(_)) {
+                                    w.props.height_policy = SizePolicy::Percent(pct);
+                                }
+                            }
+                            2 => {
+                                if !matches!(w.props.height_policy, SizePolicy::Fill) {
+                                    w.props.height_policy = SizePolicy::Fill;
+                                }
+                                ui.label("(fills remaining space)");
+                            }
+                            _ => {}
+                        }
+                    });
+
+                    // Align Self
+                    ui.horizontal(|ui| {
+                        ui.label("Align self:");
+                        let mut current_align = w.props.align_self;
+                        egui::ComboBox::from_id_salt(("align_self_combo", w.id))
+                            .selected_text(match current_align {
+                                None => "Inherit (parent)",
+                                Some(a) => a.display_name(),
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut current_align, None, "Inherit (parent)");
+                                for a in Align::all() {
+                                    ui.selectable_value(&mut current_align, Some(*a), a.display_name());
+                                }
+                            });
+                        w.props.align_self = current_align;
+                    });
+                } else {
+                    ui.label("Position / Size");
+                    ui.horizontal(|ui| {
+                        ui.label("x");
+                        ui.add(egui::DragValue::new(&mut w.pos.x));
+                        ui.label("y");
+                        ui.add(egui::DragValue::new(&mut w.pos.y));
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("w");
+                        ui.add(egui::DragValue::new(&mut w.size.x).range(16.0..=2000.0));
+                        ui.label("h");
+                        ui.add(egui::DragValue::new(&mut w.size.y).range(12.0..=2000.0));
+                    });
+                }
 
                 ui.separator();
                 ui.label("Tooltip (optional)");
