@@ -1997,6 +1997,11 @@ impl RadBuilderApp {
             return;
         }
 
+        // ── Responsive visibility check ──────────────────────────────────────
+        if !widgets[idx].props.responsive_vis.is_visible(container_rect.size()) {
+            return;
+        }
+
         if !is_edit_mode {
             if !widgets[idx].props.initially_visible {
                 return;
@@ -2037,6 +2042,12 @@ impl RadBuilderApp {
 
         if is_container {
             let w = &widgets[idx];
+
+            // ── CollapsingHeader: when closed, children are hidden ───────────
+            if w.kind == WidgetKind::CollapsingHeader && !w.props.checked {
+                return;
+            }
+
             let widget_rect = Rect::from_min_size(container_rect.min + w.pos.to_vec2(), w.size);
             let offset = Self::container_content_offset(w.kind, &w.props.text);
             let inner_rect = Rect::from_min_size(
@@ -2044,16 +2055,46 @@ impl RadBuilderApp {
                 (widget_rect.size() - offset - vec2(6.0, 6.0)).max(vec2(10.0, 10.0)),
             );
 
+            // Filter children: active, matching parent, and matching TabBar tab if applicable
+            let parent_tab_selected = w.props.selected;
+            let is_tabbar = w.kind == WidgetKind::TabBar;
+
             let mut children: Vec<(WidgetId, i32)> = widgets
                 .iter()
-                .filter(|cw| cw.parent == Some(widget_id) && cw.props.active)
+                .filter(|cw| {
+                    if cw.parent != Some(widget_id) || !cw.props.active {
+                        return false;
+                    }
+                    if is_tabbar {
+                        if let Some(assigned_tab) = cw.props.tab_page {
+                            if assigned_tab != parent_tab_selected {
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                })
                 .map(|cw| (cw.id, cw.z))
                 .collect();
             children.sort_by_key(|&(_, z)| z);
 
-            if w.props.layout_mode == LayoutMode::Free {
-                for (cid, _) in children {
-                    Self::draw_widget_tree(ui, inner_rect, grid_size, selected, cid, widgets, triggered);
+            let effective_layout_mode = w.props.responsive_layout.resolve_mode(w.props.layout_mode, container_rect.size());
+
+            if effective_layout_mode == LayoutMode::Free {
+                for (cid, _) in &children {
+                    Self::draw_widget_tree(ui, inner_rect, grid_size, selected, *cid, widgets, triggered);
+                }
+
+                // Auto-sizing height in Free mode
+                if widgets[idx].props.auto_size_y && !children.is_empty() {
+                    let max_bottom = children
+                        .iter()
+                        .filter_map(|&(cid, _)| widgets.iter().find(|x| x.id == cid).map(|cw| cw.pos.y + cw.size.y))
+                        .fold(0.0_f32, f32::max);
+                    let required_h = max_bottom + offset.y + 12.0;
+                    if required_h > 24.0 {
+                        widgets[idx].size.y = required_h;
+                    }
                 }
             } else {
                 let children_info: Vec<(WidgetId, egui::Vec2, SizePolicy, SizePolicy, Option<Align>)> = children
@@ -2067,7 +2108,7 @@ impl RadBuilderApp {
 
                 let layout_rects = Self::compute_auto_layout(
                     inner_rect.size(),
-                    w.props.layout_mode,
+                    effective_layout_mode,
                     w.props.layout_gap,
                     w.props.layout_cols,
                     w.props.layout_align,
@@ -2075,6 +2116,15 @@ impl RadBuilderApp {
                     w.props.layout_padding,
                     &children_info,
                 );
+
+                // Auto-sizing height in auto-layout mode
+                if widgets[idx].props.auto_size_y && !layout_rects.is_empty() {
+                    let max_bottom = layout_rects.iter().map(|(_, r)| r.max.y).fold(0.0_f32, f32::max);
+                    let required_h = max_bottom + offset.y + w.props.layout_padding[2] + 12.0;
+                    if required_h > 24.0 {
+                        widgets[idx].size.y = required_h;
+                    }
+                }
 
                 for (cid, rel_rect) in layout_rects {
                     let child_container_rect = Rect::from_min_size(
@@ -2235,14 +2285,18 @@ impl RadBuilderApp {
                         ui.separator();
                     }
                     WidgetKind::CollapsingHeader => {
-                        egui::CollapsingHeader::new(&w.props.text)
+                        let is_open = w.props.checked;
+                        let resp = egui::CollapsingHeader::new(&w.props.text)
                             .id_salt(("collapsing_header", w.id))
-                            .default_open(w.props.checked)
+                            .open(Some(is_open))
                             .show(ui, |ui| {
                                 if !has_children {
                                     ui.weak("(drop widgets here)");
                                 }
                             });
+                        if resp.header_response.clicked() {
+                            w.props.checked = !is_open;
+                        }
                     }
                     WidgetKind::DatePicker => {
                         let mut date = NaiveDate::from_ymd_opt(
