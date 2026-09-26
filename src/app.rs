@@ -737,6 +737,119 @@ mod tests {
         assert!(grid_code.contains("egui::Grid::new(\"grid_20\").num_columns(2)"), "should emit grid with 2 columns");
         assert!(grid_code.contains("ui.end_row();"), "should emit end_row");
     }
+
+    #[test]
+    fn test_codegen_tab_bar_conditional_pages() {
+        use crate::widget::WidgetKind;
+        let mut app = super::RadBuilderApp::default();
+
+        // TabBar with two tabs
+        let mut tabbar = make_widget(30, 1, None);
+        tabbar.kind = WidgetKind::TabBar;
+        tabbar.props.items = vec!["Tab A".into(), "Tab B".into()];
+        tabbar.props.selected = 0;
+
+        // Child assigned to Tab 0
+        let mut child_a = make_widget(31, 1, Some(30));
+        child_a.kind = WidgetKind::Label;
+        child_a.props.text = "LabelForTabA".into();
+        child_a.props.tab_page = Some(0);
+
+        // Child assigned to Tab 1
+        let mut child_b = make_widget(32, 2, Some(30));
+        child_b.kind = WidgetKind::Label;
+        child_b.props.text = "LabelForTabB".into();
+        child_b.props.tab_page = Some(1);
+
+        // Unassigned child (should appear unconditionally)
+        let mut child_free = make_widget(33, 3, Some(30));
+        child_free.kind = WidgetKind::Label;
+        child_free.props.text = "LabelAlways".into();
+        child_free.props.tab_page = None;
+
+        app.project.widgets.push(tabbar);
+        app.project.widgets.push(child_a);
+        app.project.widgets.push(child_b);
+        app.project.widgets.push(child_free);
+
+        let code = app.generate_single_file();
+        // Tab bar header
+        assert!(code.contains("ui.selectable_value"), "should emit selectable_value for tabs");
+        // Tab 0 conditional
+        assert!(code.contains("if state.tab_30 == 0"), "should emit tab page 0 conditional");
+        assert!(code.contains("LabelForTabA"), "should emit tab A child");
+        // Tab 1 conditional
+        assert!(code.contains("if state.tab_30 == 1"), "should emit tab page 1 conditional");
+        assert!(code.contains("LabelForTabB"), "should emit tab B child");
+        // Unconditional child appears without tab guard
+        assert!(code.contains("LabelAlways"), "should emit unconditional child");
+    }
+
+    #[test]
+    fn test_codegen_collapsing_header_emits_children_inside() {
+        use crate::widget::WidgetKind;
+        let mut app = super::RadBuilderApp::default();
+
+        let mut header = make_widget(40, 1, None);
+        header.kind = WidgetKind::CollapsingHeader;
+        header.props.text = "MySection".into();
+        header.props.checked = true; // default open
+
+        let mut child = make_widget(41, 1, Some(40));
+        child.kind = WidgetKind::Label;
+        child.props.text = "SectionContent".into();
+
+        app.project.widgets.push(header);
+        app.project.widgets.push(child);
+
+        let code = app.generate_single_file();
+        assert!(code.contains("egui::CollapsingHeader::new(\"MySection\")"), "should emit CollapsingHeader");
+        assert!(code.contains("SectionContent"), "child should be emitted");
+        // Children must appear inside the header's .show closure, not after });
+        let header_pos = code.find("egui::CollapsingHeader::new").unwrap_or(0);
+        let child_pos = code.find("SectionContent").unwrap_or(0);
+        assert!(child_pos > header_pos, "child should appear after CollapsingHeader::new in code");
+    }
+
+    #[test]
+    fn test_codegen_responsive_portrait_only() {
+        use crate::widget::{WidgetKind, ResponsiveVisibility};
+        let mut app = super::RadBuilderApp::default();
+
+        let mut btn = make_widget(50, 1, None);
+        btn.kind = WidgetKind::Button;
+        btn.props.text = "PortraitBtn".into();
+        btn.props.responsive_vis = ResponsiveVisibility::PortraitOnly;
+        app.project.widgets.push(btn);
+
+        let code = app.generate_single_file();
+        assert!(
+            code.contains("ui.available_height() > ui.available_width()"),
+            "should emit portrait condition"
+        );
+        assert!(code.contains("PortraitBtn"), "should still emit button text");
+    }
+
+    #[test]
+    fn test_codegen_responsive_landscape_mobile_desktop() {
+        use crate::widget::{WidgetKind, ResponsiveVisibility};
+
+        for (vis, expected_cond, label) in [
+            (ResponsiveVisibility::LandscapeOnly, "ui.available_width() >= ui.available_height()", "LandscapeBtn"),
+            (ResponsiveVisibility::MobileOnly,    "ui.available_width() <= 600.0",                 "MobileBtn"),
+            (ResponsiveVisibility::DesktopOnly,   "ui.available_width() > 600.0",                  "DesktopBtn"),
+        ] {
+            let mut app = super::RadBuilderApp::default();
+            let mut btn = make_widget(60, 1, None);
+            btn.kind = WidgetKind::Button;
+            btn.props.text = label.into();
+            btn.props.responsive_vis = vis;
+            app.project.widgets.push(btn);
+            let code = app.generate_single_file();
+            assert!(code.contains(expected_cond), "should emit condition for {:?}", label);
+            assert!(code.contains(label), "should emit widget text for {:?}", label);
+        }
+    }
 }
 
 
@@ -4994,6 +5107,17 @@ impl RadBuilderApp {
             let pos = w.pos;
             let size = w.size;
 
+            let responsive_cond = match w.props.responsive_vis {
+                crate::widget::ResponsiveVisibility::Always => None,
+                crate::widget::ResponsiveVisibility::PortraitOnly => Some("ui.available_height() > ui.available_width()"),
+                crate::widget::ResponsiveVisibility::LandscapeOnly => Some("ui.available_width() >= ui.available_height()"),
+                crate::widget::ResponsiveVisibility::MobileOnly => Some("ui.available_width() <= 600.0"),
+                crate::widget::ResponsiveVisibility::DesktopOnly => Some("ui.available_width() > 600.0"),
+            };
+            if let Some(cond) = responsive_cond {
+                out.push_str(&format!("    if {} {{\n", cond));
+            }
+
             let needs_vis = !w.props.initially_visible || ctx.visibility_toggled_ids.contains(&w.id);
             if needs_vis {
                 let name = if w.props.name.is_empty() {
@@ -5600,14 +5724,36 @@ impl RadBuilderApp {
                                     Justify::End => "egui::Align::Max",
                                     _ => "egui::Align::Min",
                                 };
-                                out.push_str(&format!("                    ui.with_layout(egui::Layout::left_to_right({justify_str}), |ui| {{\n"));
-                                for (i, child) in children.iter().enumerate() {
-                                    if i > 0 && w.props.layout_gap > 0.0 {
-                                        out.push_str(&format!("                        ui.add_space({:.1});\n", w.props.layout_gap));
+                                if w.props.responsive_layout == crate::widget::ResponsiveLayout::RowToColumnOnPortrait {
+                                    out.push_str("                    if ui.available_height() > ui.available_width() {\n");
+                                    out.push_str("                        ui.vertical(|ui| {\n");
+                                    for (i, child) in children.iter().enumerate() {
+                                        if i > 0 && w.props.layout_gap > 0.0 {
+                                            out.push_str(&format!("                            ui.add_space({:.1});\n", w.props.layout_gap));
+                                        }
+                                        emit_widget(ctx, child, out, "ui.min_rect().min");
                                     }
-                                    emit_widget(ctx, child, out, "ui.min_rect().min");
+                                    out.push_str("                        });\n");
+                                    out.push_str("                    } else {\n");
+                                    out.push_str(&format!("                        ui.with_layout(egui::Layout::left_to_right({justify_str}), |ui| {{\n"));
+                                    for (i, child) in children.iter().enumerate() {
+                                        if i > 0 && w.props.layout_gap > 0.0 {
+                                            out.push_str(&format!("                            ui.add_space({:.1});\n", w.props.layout_gap));
+                                        }
+                                        emit_widget(ctx, child, out, "ui.min_rect().min");
+                                    }
+                                    out.push_str("                        });\n");
+                                    out.push_str("                    }\n");
+                                } else {
+                                    out.push_str(&format!("                    ui.with_layout(egui::Layout::left_to_right({justify_str}), |ui| {{\n"));
+                                    for (i, child) in children.iter().enumerate() {
+                                        if i > 0 && w.props.layout_gap > 0.0 {
+                                            out.push_str(&format!("                        ui.add_space({:.1});\n", w.props.layout_gap));
+                                        }
+                                        emit_widget(ctx, child, out, "ui.min_rect().min");
+                                    }
+                                    out.push_str("                    });\n");
                                 }
-                                out.push_str("                    });\n");
                             }
                             LayoutMode::Column => {
                                 out.push_str("                    ui.vertical(|ui| {\n");
@@ -5679,14 +5825,36 @@ impl RadBuilderApp {
                         match w.props.layout_mode {
                             LayoutMode::Free => unreachable!(),
                             LayoutMode::Row => {
-                                out.push_str("                ui.horizontal(|ui| {\n");
-                                for (i, child) in children.iter().enumerate() {
-                                    if i > 0 && w.props.layout_gap > 0.0 {
-                                        out.push_str(&format!("                    ui.add_space({:.1});\n", w.props.layout_gap));
+                                if w.props.responsive_layout == crate::widget::ResponsiveLayout::RowToColumnOnPortrait {
+                                    out.push_str("                    if ui.available_height() > ui.available_width() {\n");
+                                    out.push_str("                        ui.vertical(|ui| {\n");
+                                    for (i, child) in children.iter().enumerate() {
+                                        if i > 0 && w.props.layout_gap > 0.0 {
+                                            out.push_str(&format!("                            ui.add_space({:.1});\n", w.props.layout_gap));
+                                        }
+                                        emit_widget(ctx, child, out, "ui.min_rect().min");
                                     }
-                                    emit_widget(ctx, child, out, "ui.min_rect().min");
+                                    out.push_str("                        });\n");
+                                    out.push_str("                    } else {\n");
+                                    out.push_str("                        ui.horizontal(|ui| {\n");
+                                    for (i, child) in children.iter().enumerate() {
+                                        if i > 0 && w.props.layout_gap > 0.0 {
+                                            out.push_str(&format!("                            ui.add_space({:.1});\n", w.props.layout_gap));
+                                        }
+                                        emit_widget(ctx, child, out, "ui.min_rect().min");
+                                    }
+                                    out.push_str("                        });\n");
+                                    out.push_str("                    }\n");
+                                } else {
+                                    out.push_str("                ui.horizontal(|ui| {\n");
+                                    for (i, child) in children.iter().enumerate() {
+                                        if i > 0 && w.props.layout_gap > 0.0 {
+                                            out.push_str(&format!("                    ui.add_space({:.1});\n", w.props.layout_gap));
+                                        }
+                                        emit_widget(ctx, child, out, "ui.min_rect().min");
+                                    }
+                                    out.push_str("                });\n");
                                 }
-                                out.push_str("                });\n");
                             }
                             LayoutMode::Column => {
                                 out.push_str("                ui.vertical(|ui| {\n");
@@ -5746,8 +5914,20 @@ impl RadBuilderApp {
                         tabs = tabs_code,
                     ));
                     let children = ctx.project.children_of(w.id);
-                    for child in children {
-                        emit_widget(ctx, child, out, "ui.min_rect().min");
+                    for child in &children {
+                        if child.props.tab_page.is_none() {
+                            emit_widget(ctx, child, out, "ui.min_rect().min");
+                        }
+                    }
+                    for (i, _) in w.props.items.iter().enumerate() {
+                        let page_children: Vec<&Widget> = children.iter().filter(|c| c.props.tab_page == Some(i)).copied().collect();
+                        if !page_children.is_empty() {
+                            out.push_str(&format!("        if state.tab_{} == {} {{\n", w.id, i));
+                            for child in page_children {
+                                emit_widget(ctx, child, out, "ui.min_rect().min");
+                            }
+                            out.push_str("        }\n");
+                        }
                     }
                     out.push_str("    });\n");
                 }
@@ -5814,6 +5994,10 @@ impl RadBuilderApp {
             }
 
             if needs_vis {
+                out.push_str("    }\n");
+            }
+
+            if responsive_cond.is_some() {
                 out.push_str("    }\n");
             }
         }
