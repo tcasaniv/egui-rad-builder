@@ -7,10 +7,11 @@
 use crate::{
     highlight::Highlighter,
     history::{History, HistorySnapshot},
-    project::Project,
+    project::{Project, ScreenPreset},
     widget::{
-        self, ActionEffect, ActionTrigger, Align, DockArea, Justify, LayoutMode, SizePolicy,
-        Widget, WidgetAction, WidgetId, WidgetKind, escape, snap_pos_with_grid,
+        self, ActionEffect, ActionTrigger, Align, DockArea, Justify, LayoutMode,
+        ResponsiveLayout, ResponsiveVisibility, SizePolicy, Widget, WidgetAction, WidgetId,
+        WidgetKind, escape, snap_pos_with_grid,
     },
 };
 use chrono::{Datelike, NaiveDate};
@@ -735,6 +736,119 @@ mod tests {
         let grid_code = app_grid.generate_single_file();
         assert!(grid_code.contains("egui::Grid::new(\"grid_20\").num_columns(2)"), "should emit grid with 2 columns");
         assert!(grid_code.contains("ui.end_row();"), "should emit end_row");
+    }
+
+    #[test]
+    fn test_codegen_tab_bar_conditional_pages() {
+        use crate::widget::WidgetKind;
+        let mut app = super::RadBuilderApp::default();
+
+        // TabBar with two tabs
+        let mut tabbar = make_widget(30, 1, None);
+        tabbar.kind = WidgetKind::TabBar;
+        tabbar.props.items = vec!["Tab A".into(), "Tab B".into()];
+        tabbar.props.selected = 0;
+
+        // Child assigned to Tab 0
+        let mut child_a = make_widget(31, 1, Some(30));
+        child_a.kind = WidgetKind::Label;
+        child_a.props.text = "LabelForTabA".into();
+        child_a.props.tab_page = Some(0);
+
+        // Child assigned to Tab 1
+        let mut child_b = make_widget(32, 2, Some(30));
+        child_b.kind = WidgetKind::Label;
+        child_b.props.text = "LabelForTabB".into();
+        child_b.props.tab_page = Some(1);
+
+        // Unassigned child (should appear unconditionally)
+        let mut child_free = make_widget(33, 3, Some(30));
+        child_free.kind = WidgetKind::Label;
+        child_free.props.text = "LabelAlways".into();
+        child_free.props.tab_page = None;
+
+        app.project.widgets.push(tabbar);
+        app.project.widgets.push(child_a);
+        app.project.widgets.push(child_b);
+        app.project.widgets.push(child_free);
+
+        let code = app.generate_single_file();
+        // Tab bar header
+        assert!(code.contains("ui.selectable_value"), "should emit selectable_value for tabs");
+        // Tab 0 conditional
+        assert!(code.contains("if state.tab_30 == 0"), "should emit tab page 0 conditional");
+        assert!(code.contains("LabelForTabA"), "should emit tab A child");
+        // Tab 1 conditional
+        assert!(code.contains("if state.tab_30 == 1"), "should emit tab page 1 conditional");
+        assert!(code.contains("LabelForTabB"), "should emit tab B child");
+        // Unconditional child appears without tab guard
+        assert!(code.contains("LabelAlways"), "should emit unconditional child");
+    }
+
+    #[test]
+    fn test_codegen_collapsing_header_emits_children_inside() {
+        use crate::widget::WidgetKind;
+        let mut app = super::RadBuilderApp::default();
+
+        let mut header = make_widget(40, 1, None);
+        header.kind = WidgetKind::CollapsingHeader;
+        header.props.text = "MySection".into();
+        header.props.checked = true; // default open
+
+        let mut child = make_widget(41, 1, Some(40));
+        child.kind = WidgetKind::Label;
+        child.props.text = "SectionContent".into();
+
+        app.project.widgets.push(header);
+        app.project.widgets.push(child);
+
+        let code = app.generate_single_file();
+        assert!(code.contains("egui::CollapsingHeader::new(\"MySection\")"), "should emit CollapsingHeader");
+        assert!(code.contains("SectionContent"), "child should be emitted");
+        // Children must appear inside the header's .show closure, not after });
+        let header_pos = code.find("egui::CollapsingHeader::new").unwrap_or(0);
+        let child_pos = code.find("SectionContent").unwrap_or(0);
+        assert!(child_pos > header_pos, "child should appear after CollapsingHeader::new in code");
+    }
+
+    #[test]
+    fn test_codegen_responsive_portrait_only() {
+        use crate::widget::{WidgetKind, ResponsiveVisibility};
+        let mut app = super::RadBuilderApp::default();
+
+        let mut btn = make_widget(50, 1, None);
+        btn.kind = WidgetKind::Button;
+        btn.props.text = "PortraitBtn".into();
+        btn.props.responsive_vis = ResponsiveVisibility::PortraitOnly;
+        app.project.widgets.push(btn);
+
+        let code = app.generate_single_file();
+        assert!(
+            code.contains("ui.available_height() > ui.available_width()"),
+            "should emit portrait condition"
+        );
+        assert!(code.contains("PortraitBtn"), "should still emit button text");
+    }
+
+    #[test]
+    fn test_codegen_responsive_landscape_mobile_desktop() {
+        use crate::widget::{WidgetKind, ResponsiveVisibility};
+
+        for (vis, expected_cond, label) in [
+            (ResponsiveVisibility::LandscapeOnly, "ui.available_width() >= ui.available_height()", "LandscapeBtn"),
+            (ResponsiveVisibility::MobileOnly,    "ui.available_width() <= 600.0",                 "MobileBtn"),
+            (ResponsiveVisibility::DesktopOnly,   "ui.available_width() > 600.0",                  "DesktopBtn"),
+        ] {
+            let mut app = super::RadBuilderApp::default();
+            let mut btn = make_widget(60, 1, None);
+            btn.kind = WidgetKind::Button;
+            btn.props.text = label.into();
+            btn.props.responsive_vis = vis;
+            app.project.widgets.push(btn);
+            let code = app.generate_single_file();
+            assert!(code.contains(expected_cond), "should emit condition for {:?}", label);
+            assert!(code.contains(label), "should emit widget text for {:?}", label);
+        }
     }
 }
 
@@ -1997,6 +2111,11 @@ impl RadBuilderApp {
             return;
         }
 
+        // ── Responsive visibility check ──────────────────────────────────────
+        if !widgets[idx].props.responsive_vis.is_visible(container_rect.size()) {
+            return;
+        }
+
         if !is_edit_mode {
             if !widgets[idx].props.initially_visible {
                 return;
@@ -2037,6 +2156,12 @@ impl RadBuilderApp {
 
         if is_container {
             let w = &widgets[idx];
+
+            // ── CollapsingHeader: when closed, children are hidden ───────────
+            if w.kind == WidgetKind::CollapsingHeader && !w.props.checked {
+                return;
+            }
+
             let widget_rect = Rect::from_min_size(container_rect.min + w.pos.to_vec2(), w.size);
             let offset = Self::container_content_offset(w.kind, &w.props.text);
             let inner_rect = Rect::from_min_size(
@@ -2044,16 +2169,46 @@ impl RadBuilderApp {
                 (widget_rect.size() - offset - vec2(6.0, 6.0)).max(vec2(10.0, 10.0)),
             );
 
+            // Filter children: active, matching parent, and matching TabBar tab if applicable
+            let parent_tab_selected = w.props.selected;
+            let is_tabbar = w.kind == WidgetKind::TabBar;
+
             let mut children: Vec<(WidgetId, i32)> = widgets
                 .iter()
-                .filter(|cw| cw.parent == Some(widget_id) && cw.props.active)
+                .filter(|cw| {
+                    if cw.parent != Some(widget_id) || !cw.props.active {
+                        return false;
+                    }
+                    if is_tabbar {
+                        if let Some(assigned_tab) = cw.props.tab_page {
+                            if assigned_tab != parent_tab_selected {
+                                return false;
+                            }
+                        }
+                    }
+                    true
+                })
                 .map(|cw| (cw.id, cw.z))
                 .collect();
             children.sort_by_key(|&(_, z)| z);
 
-            if w.props.layout_mode == LayoutMode::Free {
-                for (cid, _) in children {
-                    Self::draw_widget_tree(ui, inner_rect, grid_size, selected, cid, widgets, triggered);
+            let effective_layout_mode = w.props.responsive_layout.resolve_mode(w.props.layout_mode, container_rect.size());
+
+            if effective_layout_mode == LayoutMode::Free {
+                for (cid, _) in &children {
+                    Self::draw_widget_tree(ui, inner_rect, grid_size, selected, *cid, widgets, triggered);
+                }
+
+                // Auto-sizing height in Free mode
+                if widgets[idx].props.auto_size_y && !children.is_empty() {
+                    let max_bottom = children
+                        .iter()
+                        .filter_map(|&(cid, _)| widgets.iter().find(|x| x.id == cid).map(|cw| cw.pos.y + cw.size.y))
+                        .fold(0.0_f32, f32::max);
+                    let required_h = max_bottom + offset.y + 12.0;
+                    if required_h > 24.0 {
+                        widgets[idx].size.y = required_h;
+                    }
                 }
             } else {
                 let children_info: Vec<(WidgetId, egui::Vec2, SizePolicy, SizePolicy, Option<Align>)> = children
@@ -2067,7 +2222,7 @@ impl RadBuilderApp {
 
                 let layout_rects = Self::compute_auto_layout(
                     inner_rect.size(),
-                    w.props.layout_mode,
+                    effective_layout_mode,
                     w.props.layout_gap,
                     w.props.layout_cols,
                     w.props.layout_align,
@@ -2075,6 +2230,15 @@ impl RadBuilderApp {
                     w.props.layout_padding,
                     &children_info,
                 );
+
+                // Auto-sizing height in auto-layout mode
+                if widgets[idx].props.auto_size_y && !layout_rects.is_empty() {
+                    let max_bottom = layout_rects.iter().map(|(_, r)| r.max.y).fold(0.0_f32, f32::max);
+                    let required_h = max_bottom + offset.y + w.props.layout_padding[2] + 12.0;
+                    if required_h > 24.0 {
+                        widgets[idx].size.y = required_h;
+                    }
+                }
 
                 for (cid, rel_rect) in layout_rects {
                     let child_container_rect = Rect::from_min_size(
@@ -2235,14 +2399,18 @@ impl RadBuilderApp {
                         ui.separator();
                     }
                     WidgetKind::CollapsingHeader => {
-                        egui::CollapsingHeader::new(&w.props.text)
+                        let is_open = w.props.checked;
+                        let resp = egui::CollapsingHeader::new(&w.props.text)
                             .id_salt(("collapsing_header", w.id))
-                            .default_open(w.props.checked)
+                            .open(Some(is_open))
                             .show(ui, |ui| {
                                 if !has_children {
                                     ui.weak("(drop widgets here)");
                                 }
                             });
+                        if resp.header_response.clicked() {
+                            w.props.checked = !is_open;
+                        }
                     }
                     WidgetKind::DatePicker => {
                         let mut date = NaiveDate::from_ymd_opt(
@@ -3202,6 +3370,12 @@ impl RadBuilderApp {
             .map(|pw| pw.props.layout_mode)
             .unwrap_or(LayoutMode::Free);
 
+        let parent_tab_items: Vec<String> = current_parent
+            .and_then(|pid| self.project.widgets.iter().find(|x| x.id == pid))
+            .filter(|pw| pw.kind == WidgetKind::TabBar)
+            .map(|pw| pw.props.items.clone())
+            .unwrap_or_default();
+
         let all_target_widgets: Vec<(WidgetId, String)> = self
             .project
             .widgets
@@ -3483,6 +3657,28 @@ impl RadBuilderApp {
                         });
                 });
 
+                // Assigned Tab Page (when parent is a TabBar)
+                if !parent_tab_items.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.label("Assigned Tab:");
+                        let current_tab_label = match w.props.tab_page {
+                            None => "All Tabs".to_string(),
+                            Some(idx) => parent_tab_items
+                                .get(idx)
+                                .map(|s| format!("Tab {}: {}", idx + 1, s))
+                                .unwrap_or_else(|| format!("Tab {}", idx + 1)),
+                        };
+                        egui::ComboBox::from_id_salt(("tab_page_select", w.id))
+                            .selected_text(current_tab_label)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(&mut w.props.tab_page, None, "All Tabs (visible on any tab)");
+                                for (i, it) in parent_tab_items.iter().enumerate() {
+                                    ui.selectable_value(&mut w.props.tab_page, Some(i), format!("Tab {}: {}", i + 1, it));
+                                }
+                            });
+                    });
+                }
+
                 ui.horizontal(|ui| {
                     ui.label("Area");
                     let mut area = w.area;
@@ -3518,6 +3714,20 @@ impl RadBuilderApp {
                             .show_ui(ui, |ui| {
                                 for m in LayoutMode::all() {
                                     ui.selectable_value(&mut w.props.layout_mode, *m, m.display_name());
+                                }
+                            });
+                    });
+
+                    ui.checkbox(&mut w.props.auto_size_y, "Auto height (hug content)")
+                        .on_hover_text("Automatically adjusts container height to encompass all child widgets");
+
+                    ui.horizontal(|ui| {
+                        ui.label("Adaptive layout:");
+                        egui::ComboBox::from_id_salt(("container_responsive_layout", w.id))
+                            .selected_text(w.props.responsive_layout.display_name())
+                            .show_ui(ui, |ui| {
+                                for rl in ResponsiveLayout::all() {
+                                    ui.selectable_value(&mut w.props.responsive_layout, *rl, rl.display_name());
                                 }
                             });
                     });
@@ -3708,6 +3918,19 @@ impl RadBuilderApp {
                         ui.add(egui::DragValue::new(&mut w.size.y).range(12.0..=2000.0));
                     });
                 }
+
+                ui.separator();
+                ui.label(egui::RichText::new("📱 Responsive").strong());
+                ui.horizontal(|ui| {
+                    ui.label("Visibility:");
+                    egui::ComboBox::from_id_salt(("widget_responsive_vis", w.id))
+                        .selected_text(w.props.responsive_vis.display_name())
+                        .show_ui(ui, |ui| {
+                            for rv in ResponsiveVisibility::all() {
+                                ui.selectable_value(&mut w.props.responsive_vis, *rv, rv.display_name());
+                            }
+                        });
+                });
 
                 ui.separator();
                 ui.label("Tooltip (optional)");
@@ -4261,6 +4484,29 @@ impl RadBuilderApp {
                 );
                 });
             });
+
+            ui.separator();
+            ui.push_id("menu_device_presets", |ui| {
+                ui.menu_button(self.project.screen_preset.display_name(), |ui| {
+                    for preset in ScreenPreset::all() {
+                        let selected = self.project.screen_preset == *preset;
+                        if ui.selectable_label(selected, preset.display_name()).clicked() {
+                            self.project.screen_preset = *preset;
+                            if let Some(dim) = preset.dimensions() {
+                                self.project.canvas_size = dim;
+                            }
+                            ui.close_kind(egui::UiKind::Menu);
+                        }
+                    }
+                });
+            });
+
+            if ui.button("🔄").on_hover_text("Rotate screen orientation (swap width <-> height)").clicked() {
+                let temp = self.project.canvas_size.x;
+                self.project.canvas_size.x = self.project.canvas_size.y;
+                self.project.canvas_size.y = temp;
+                self.project.screen_preset = ScreenPreset::Custom;
+            }
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Generate Code").on_hover_text("Ctrl+G").clicked() {
@@ -4860,6 +5106,17 @@ impl RadBuilderApp {
 
             let pos = w.pos;
             let size = w.size;
+
+            let responsive_cond = match w.props.responsive_vis {
+                crate::widget::ResponsiveVisibility::Always => None,
+                crate::widget::ResponsiveVisibility::PortraitOnly => Some("ui.available_height() > ui.available_width()"),
+                crate::widget::ResponsiveVisibility::LandscapeOnly => Some("ui.available_width() >= ui.available_height()"),
+                crate::widget::ResponsiveVisibility::MobileOnly => Some("ui.available_width() <= 600.0"),
+                crate::widget::ResponsiveVisibility::DesktopOnly => Some("ui.available_width() > 600.0"),
+            };
+            if let Some(cond) = responsive_cond {
+                out.push_str(&format!("    if {} {{\n", cond));
+            }
 
             let needs_vis = !w.props.initially_visible || ctx.visibility_toggled_ids.contains(&w.id);
             if needs_vis {
@@ -5467,14 +5724,36 @@ impl RadBuilderApp {
                                     Justify::End => "egui::Align::Max",
                                     _ => "egui::Align::Min",
                                 };
-                                out.push_str(&format!("                    ui.with_layout(egui::Layout::left_to_right({justify_str}), |ui| {{\n"));
-                                for (i, child) in children.iter().enumerate() {
-                                    if i > 0 && w.props.layout_gap > 0.0 {
-                                        out.push_str(&format!("                        ui.add_space({:.1});\n", w.props.layout_gap));
+                                if w.props.responsive_layout == crate::widget::ResponsiveLayout::RowToColumnOnPortrait {
+                                    out.push_str("                    if ui.available_height() > ui.available_width() {\n");
+                                    out.push_str("                        ui.vertical(|ui| {\n");
+                                    for (i, child) in children.iter().enumerate() {
+                                        if i > 0 && w.props.layout_gap > 0.0 {
+                                            out.push_str(&format!("                            ui.add_space({:.1});\n", w.props.layout_gap));
+                                        }
+                                        emit_widget(ctx, child, out, "ui.min_rect().min");
                                     }
-                                    emit_widget(ctx, child, out, "ui.min_rect().min");
+                                    out.push_str("                        });\n");
+                                    out.push_str("                    } else {\n");
+                                    out.push_str(&format!("                        ui.with_layout(egui::Layout::left_to_right({justify_str}), |ui| {{\n"));
+                                    for (i, child) in children.iter().enumerate() {
+                                        if i > 0 && w.props.layout_gap > 0.0 {
+                                            out.push_str(&format!("                            ui.add_space({:.1});\n", w.props.layout_gap));
+                                        }
+                                        emit_widget(ctx, child, out, "ui.min_rect().min");
+                                    }
+                                    out.push_str("                        });\n");
+                                    out.push_str("                    }\n");
+                                } else {
+                                    out.push_str(&format!("                    ui.with_layout(egui::Layout::left_to_right({justify_str}), |ui| {{\n"));
+                                    for (i, child) in children.iter().enumerate() {
+                                        if i > 0 && w.props.layout_gap > 0.0 {
+                                            out.push_str(&format!("                        ui.add_space({:.1});\n", w.props.layout_gap));
+                                        }
+                                        emit_widget(ctx, child, out, "ui.min_rect().min");
+                                    }
+                                    out.push_str("                    });\n");
                                 }
-                                out.push_str("                    });\n");
                             }
                             LayoutMode::Column => {
                                 out.push_str("                    ui.vertical(|ui| {\n");
@@ -5546,14 +5825,36 @@ impl RadBuilderApp {
                         match w.props.layout_mode {
                             LayoutMode::Free => unreachable!(),
                             LayoutMode::Row => {
-                                out.push_str("                ui.horizontal(|ui| {\n");
-                                for (i, child) in children.iter().enumerate() {
-                                    if i > 0 && w.props.layout_gap > 0.0 {
-                                        out.push_str(&format!("                    ui.add_space({:.1});\n", w.props.layout_gap));
+                                if w.props.responsive_layout == crate::widget::ResponsiveLayout::RowToColumnOnPortrait {
+                                    out.push_str("                    if ui.available_height() > ui.available_width() {\n");
+                                    out.push_str("                        ui.vertical(|ui| {\n");
+                                    for (i, child) in children.iter().enumerate() {
+                                        if i > 0 && w.props.layout_gap > 0.0 {
+                                            out.push_str(&format!("                            ui.add_space({:.1});\n", w.props.layout_gap));
+                                        }
+                                        emit_widget(ctx, child, out, "ui.min_rect().min");
                                     }
-                                    emit_widget(ctx, child, out, "ui.min_rect().min");
+                                    out.push_str("                        });\n");
+                                    out.push_str("                    } else {\n");
+                                    out.push_str("                        ui.horizontal(|ui| {\n");
+                                    for (i, child) in children.iter().enumerate() {
+                                        if i > 0 && w.props.layout_gap > 0.0 {
+                                            out.push_str(&format!("                            ui.add_space({:.1});\n", w.props.layout_gap));
+                                        }
+                                        emit_widget(ctx, child, out, "ui.min_rect().min");
+                                    }
+                                    out.push_str("                        });\n");
+                                    out.push_str("                    }\n");
+                                } else {
+                                    out.push_str("                ui.horizontal(|ui| {\n");
+                                    for (i, child) in children.iter().enumerate() {
+                                        if i > 0 && w.props.layout_gap > 0.0 {
+                                            out.push_str(&format!("                    ui.add_space({:.1});\n", w.props.layout_gap));
+                                        }
+                                        emit_widget(ctx, child, out, "ui.min_rect().min");
+                                    }
+                                    out.push_str("                });\n");
                                 }
-                                out.push_str("                });\n");
                             }
                             LayoutMode::Column => {
                                 out.push_str("                ui.vertical(|ui| {\n");
@@ -5613,8 +5914,20 @@ impl RadBuilderApp {
                         tabs = tabs_code,
                     ));
                     let children = ctx.project.children_of(w.id);
-                    for child in children {
-                        emit_widget(ctx, child, out, "ui.min_rect().min");
+                    for child in &children {
+                        if child.props.tab_page.is_none() {
+                            emit_widget(ctx, child, out, "ui.min_rect().min");
+                        }
+                    }
+                    for (i, _) in w.props.items.iter().enumerate() {
+                        let page_children: Vec<&Widget> = children.iter().filter(|c| c.props.tab_page == Some(i)).copied().collect();
+                        if !page_children.is_empty() {
+                            out.push_str(&format!("        if state.tab_{} == {} {{\n", w.id, i));
+                            for child in page_children {
+                                emit_widget(ctx, child, out, "ui.min_rect().min");
+                            }
+                            out.push_str("        }\n");
+                        }
                     }
                     out.push_str("    });\n");
                 }
@@ -5681,6 +5994,10 @@ impl RadBuilderApp {
             }
 
             if needs_vis {
+                out.push_str("    }\n");
+            }
+
+            if responsive_cond.is_some() {
                 out.push_str("    }\n");
             }
         }
