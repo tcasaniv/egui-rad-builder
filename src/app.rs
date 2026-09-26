@@ -850,6 +850,54 @@ mod tests {
             assert!(code.contains(label), "should emit widget text for {:?}", label);
         }
     }
+
+    #[test]
+    fn test_platform_info() {
+        let info = super::RadBuilderApp::platform_info();
+        assert!(!info.is_empty(), "platform info must not be empty");
+        assert!(info.contains(std::env::consts::ARCH), "should contain current architecture");
+        assert!(
+            info.chars().all(|c| c.is_ascii() || c.is_alphanumeric() || c.is_whitespace() || c == '(' || c == ')' || c == '-'),
+            "platform info must be clean text without emojis"
+        );
+    }
+
+    #[test]
+    fn test_status_bar_messages() {
+        let mut app = super::RadBuilderApp::default();
+        // Initial state is "Ready"
+        assert_eq!(app.status_message, "Ready");
+
+        // Custom set_status
+        app.set_status("Project loaded".into());
+        assert_eq!(app.status_message, "Project loaded");
+
+        // Add widget
+        let w = make_widget(10, 1, None);
+        app.project.widgets.push(w);
+        app.selected = vec![crate::widget::WidgetId::new(10)];
+
+        // Duplicate
+        app.duplicate_selected();
+        assert_eq!(app.status_message, "Duplicated 1 widget(s)");
+
+        // Undo
+        app.undo();
+        assert_eq!(app.status_message, "Undo");
+
+        // Redo
+        app.redo();
+        assert_eq!(app.status_message, "Redo");
+
+        // Delete
+        app.delete_selected();
+        assert_eq!(app.status_message, "Deleted 1 widget(s)");
+
+        // Paste
+        app.clipboard = Some(make_widget(99, 1, None));
+        app.paste();
+        assert!(app.status_message.starts_with("Pasted widget #"));
+    }
 }
 
 
@@ -933,8 +981,8 @@ pub struct RadBuilderApp {
     clipboard: Option<Widget>,
     /// Current project file path (for Save)
     current_file: Option<PathBuf>,
-    /// Error/status message to display
-    status_message: Option<(String, std::time::Instant)>,
+    /// Error/status message to display in the bottom status bar
+    status_message: String,
     /// Drag selection box (start position when dragging to select)
     #[allow(dead_code)]
     drag_select_start: Option<Pos2>,
@@ -985,7 +1033,7 @@ impl Default for RadBuilderApp {
             live_center: None,
             clipboard: None,
             current_file: None,
-            status_message: None,
+            status_message: "Ready".to_string(),
             drag_select_start: None,
             highlighter: Highlighter::new(),
             syntax_highlighting: true,
@@ -1046,8 +1094,10 @@ impl RadBuilderApp {
                 to_delete.push(sel_id);
                 to_delete.extend(self.project.get_descendants(sel_id));
             }
+            let count = to_delete.len();
             self.project.widgets.retain(|w| !to_delete.contains(&w.id));
             self.selected.clear();
+            self.set_status(format!("Deleted {} widget(s)", count));
         }
     }
 
@@ -1192,7 +1242,9 @@ impl RadBuilderApp {
                 new_ids.push(new_id);
             }
         }
+        let count = new_ids.len();
         self.selected = new_ids;
+        self.set_status(format!("Duplicated {} widget(s)", count));
     }
 
     fn paste(&mut self) {
@@ -1207,6 +1259,7 @@ impl RadBuilderApp {
             pasted.pos.y += 20.0;
             self.project.widgets.push(pasted);
             self.selected = vec![new_id];
+            self.set_status(format!("Pasted widget #{}", new_id));
         }
     }
 
@@ -1500,9 +1553,29 @@ impl RadBuilderApp {
         }
     }
 
-    /// Set a status message that will auto-clear after a few seconds
+    /// Returns the host platform and architecture without emojis (e.g. "Windows x86_64")
+    pub(crate) fn platform_info() -> String {
+        let os = if cfg!(target_os = "windows") {
+            "Windows"
+        } else if cfg!(target_os = "macos") {
+            "macOS"
+        } else if cfg!(target_os = "linux") {
+            "Linux"
+        } else if cfg!(target_os = "android") {
+            "Android"
+        } else if cfg!(target_os = "ios") {
+            "iOS"
+        } else if cfg!(target_arch = "wasm32") {
+            "WASM"
+        } else {
+            std::env::consts::OS
+        };
+        format!("{} {}", os, std::env::consts::ARCH)
+    }
+
+    /// Set a status message that will be permanently displayed in the status bar
     fn set_status(&mut self, msg: String) {
-        self.status_message = Some((msg, std::time::Instant::now()));
+        self.status_message = msg;
     }
 
     /// Get widgets in selection rect (for drag-box selection)
@@ -4138,17 +4211,6 @@ impl RadBuilderApp {
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         ui.push_id("top_bar", |ui| {
-            // Show status message if recent
-            if let Some((msg, time)) = &self.status_message {
-                if time.elapsed().as_secs() < 3 {
-                    ui.horizontal(|ui| {
-                        ui.label(msg);
-                    });
-                } else {
-                    self.status_message = None;
-                }
-            }
-
             egui::MenuBar::new().ui(ui, |ui| {
             ui.push_id("menu_file", |ui| {
                 ui.menu_button("File", |ui| {
@@ -4511,6 +4573,7 @@ impl RadBuilderApp {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui.button("Generate Code").on_hover_text("Ctrl+G").clicked() {
                     self.generated = self.generate_code();
+                    self.set_status("Code generated".into());
                 }
                 // Preview/Edit mode toggle button
                 ui.separator();
@@ -4536,6 +4599,40 @@ impl RadBuilderApp {
                     ui.label(format!("{} selected", self.selected.len()));
                 }
             });
+            });
+        });
+    }
+
+    /// Permanent bottom status bar displaying status messages, platform, and version.
+    fn status_bar_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            // Left: status message (no emojis)
+            ui.label(&self.status_message);
+
+            // Right: status details (aligned right-to-left, no emojis)
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Version & Platform
+                let version = env!("CARGO_PKG_VERSION");
+                let platform = Self::platform_info();
+                ui.label(format!("v{} ({})", version, platform));
+                ui.separator();
+
+                // Canvas dimensions & preset
+                ui.label(format!(
+                    "{:.0}x{:.0} ({})",
+                    self.project.canvas_size.x,
+                    self.project.canvas_size.y,
+                    self.project.screen_preset.display_name()
+                ));
+                ui.separator();
+
+                // Selection & widget count
+                let widget_count = self.project.widgets.len();
+                if !self.selected.is_empty() {
+                    ui.label(format!("{}/{} selected", self.selected.len(), widget_count));
+                } else {
+                    ui.label(format!("{} widgets", widget_count));
+                }
             });
         });
     }
@@ -6389,9 +6486,11 @@ impl eframe::App for RadBuilderApp {
         // Ctrl+G: Generate code
         if generate_pressed {
             self.generated = self.generate_code();
+            self.set_status("Code generated".into());
         }
 
         egui::TopBottomPanel::top("menubar").show(ctx, |ui| self.top_bar(ui));
+        egui::TopBottomPanel::bottom("app_status_bar").show(ctx, |ui| self.status_bar_ui(ui));
         if self.palette_open {
             egui::SidePanel::left("palette")
                 .resizable(true)
