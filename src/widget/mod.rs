@@ -667,6 +667,46 @@ pub(crate) struct WidgetProps {
     /// Interactive actions defined on this widget.
     #[serde(default)]
     pub(crate) actions: Vec<WidgetAction>,
+
+    // ── Layout (container props) ───────────────────────────────────────────
+    /// How this container distributes its children. CSS: `display`/`flex-direction`.
+    /// Ignored on non-container widgets.
+    #[serde(default)]
+    pub(crate) layout_mode: LayoutMode,
+
+    /// Gap between children in auto-layout modes (px). CSS: `gap`.
+    #[serde(default = "default_layout_gap")]
+    pub(crate) layout_gap: f32,
+
+    /// Number of columns for `Grid` mode. CSS: `grid-template-columns: repeat(N, 1fr)`.
+    #[serde(default = "default_layout_cols")]
+    pub(crate) layout_cols: usize,
+
+    /// Cross-axis alignment. CSS: `align-items`.
+    #[serde(default)]
+    pub(crate) layout_align: Align,
+
+    /// Main-axis justification. CSS: `justify-content`.
+    #[serde(default)]
+    pub(crate) layout_justify: Justify,
+
+    /// Inner padding [top, right, bottom, left] in px. CSS: `padding`.
+    #[serde(default)]
+    pub(crate) layout_padding: [f32; 4],
+
+    // ── Size policy (child props) ──────────────────────────────────────────
+    /// Width policy when inside an auto-layout parent. CSS: `width` / `flex-basis`.
+    #[serde(default)]
+    pub(crate) width_policy: SizePolicy,
+
+    /// Height policy when inside an auto-layout parent. CSS: `height`.
+    #[serde(default)]
+    pub(crate) height_policy: SizePolicy,
+
+    /// Per-child cross-axis alignment override. CSS: `align-self`.
+    /// `None` means inherit from parent container's `layout_align`.
+    #[serde(default)]
+    pub(crate) align_self: Option<Align>,
 }
 
 fn widget_prop_default_true() -> bool {
@@ -702,6 +742,17 @@ impl Default for WidgetProps {
             initially_visible: true,
             opacity: 1.0,
             actions: Vec::new(),
+            // layout (container)
+            layout_mode: LayoutMode::Free,
+            layout_gap: 8.0,
+            layout_cols: 2,
+            layout_align: Align::Start,
+            layout_justify: Justify::Start,
+            layout_padding: [0.0; 4],
+            // size policy (child)
+            width_policy: SizePolicy::Fixed,
+            height_policy: SizePolicy::Fixed,
+            align_self: None,
         }
     }
 }
@@ -713,6 +764,144 @@ pub(crate) fn snap_pos_with_grid(p: Pos2, grid: f32) -> Pos2 {
 pub(crate) fn escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
 }
+
+// ── Layout system ─────────────────────────────────────────────────────────────
+
+/// How a container distributes its children along the main axis.
+/// Equivalent to CSS `display: flex/grid` + `flex-direction`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub(crate) enum LayoutMode {
+    /// Absolute (x, y) positioning — default, current behavior.
+    #[default]
+    Free,
+    /// Children left → right (CSS: `flex-direction: row`).
+    Row,
+    /// Children top → bottom (CSS: `flex-direction: column`).
+    Column,
+    /// Children left → right with wrapping (CSS: `flex-wrap: wrap`).
+    WrapRow,
+    /// Children in an N-column grid (CSS: `display: grid`).
+    Grid,
+}
+
+impl LayoutMode {
+    pub(crate) const fn display_name(self) -> &'static str {
+        match self {
+            Self::Free    => "Free (absolute)",
+            Self::Row     => "Row",
+            Self::Column  => "Column",
+            Self::WrapRow => "Wrap Row",
+            Self::Grid    => "Grid",
+        }
+    }
+    pub(crate) const fn all() -> &'static [LayoutMode] {
+        &[LayoutMode::Free, LayoutMode::Row, LayoutMode::Column, LayoutMode::WrapRow, LayoutMode::Grid]
+    }
+}
+
+/// Cross-axis alignment. CSS `align-items` / `align-self`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub(crate) enum Align {
+    /// CSS: `flex-start`
+    #[default]
+    Start,
+    /// CSS: `center`
+    Center,
+    /// CSS: `flex-end`
+    End,
+    /// Fills the cross-axis. CSS: `stretch`
+    Stretch,
+}
+
+impl Align {
+    pub(crate) const fn display_name(self) -> &'static str {
+        match self {
+            Self::Start   => "Start",
+            Self::Center  => "Center",
+            Self::End     => "End",
+            Self::Stretch => "Stretch",
+        }
+    }
+    pub(crate) const fn all() -> &'static [Align] {
+        &[Align::Start, Align::Center, Align::End, Align::Stretch]
+    }
+}
+
+/// Main-axis justification. CSS `justify-content`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub(crate) enum Justify {
+    /// CSS: `flex-start`
+    #[default]
+    Start,
+    /// CSS: `center`
+    Center,
+    /// CSS: `flex-end`
+    End,
+    /// Equal gaps between items, none at edges. CSS: `space-between`
+    SpaceBetween,
+    /// Equal gaps around items. CSS: `space-around`
+    SpaceAround,
+    /// Equal gaps between items and edges. CSS: `space-evenly`
+    SpaceEvenly,
+}
+
+impl Justify {
+    pub(crate) const fn display_name(self) -> &'static str {
+        match self {
+            Self::Start       => "Start",
+            Self::Center      => "Center",
+            Self::End         => "End",
+            Self::SpaceBetween => "Space Between",
+            Self::SpaceAround  => "Space Around",
+            Self::SpaceEvenly  => "Space Evenly",
+        }
+    }
+    pub(crate) const fn all() -> &'static [Justify] {
+        &[
+            Justify::Start, Justify::Center, Justify::End,
+            Justify::SpaceBetween, Justify::SpaceAround, Justify::SpaceEvenly,
+        ]
+    }
+}
+
+/// How a widget's size is computed along one axis when inside an auto-layout container.
+/// Ignored in `Free` mode (absolute positioning).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize, Default)]
+#[serde(tag = "t", content = "v")]
+pub(crate) enum SizePolicy {
+    /// Use the widget's `size.x` / `size.y` as-is (pixel). Default.
+    #[default]
+    Fixed,
+    /// Percentage of the parent container's inner dimension (0.0–100.0).
+    /// e.g. `Percent(50.0)` = 50% of parent width/height.
+    Percent(f32),
+    /// Expand to fill remaining space after Fixed/Percent siblings.
+    /// Equivalent to CSS `flex: 1`. Multiple Fill children share equally.
+    Fill,
+}
+
+#[allow(dead_code)]
+impl SizePolicy {
+    pub(crate) fn display_name(&self) -> &'static str {
+        match self {
+            Self::Fixed       => "Fixed (px)",
+            Self::Percent(_)  => "Percent (%)",
+            Self::Fill        => "Fill",
+        }
+    }
+
+    /// Resolve to a pixel value given the available dimension.
+    pub(crate) fn resolve(&self, fixed_px: f32, available: f32) -> Option<f32> {
+        match self {
+            Self::Fixed      => Some(fixed_px),
+            Self::Percent(p) => Some(available * p / 100.0),
+            Self::Fill       => None, // handled separately in the layout pass
+        }
+    }
+}
+
+fn default_layout_gap()  -> f32   { 8.0 }
+fn default_layout_cols() -> usize { 2 }
 
 #[cfg(test)]
 mod tests {
@@ -1098,5 +1287,36 @@ mod tests {
 
         let props: WidgetProps = serde_json::from_str(json).unwrap();
         assert!(props.actions.is_empty());
+        assert_eq!(props.layout_mode, LayoutMode::Free);
+        assert_eq!(props.width_policy, SizePolicy::Fixed);
+        assert_eq!(props.height_policy, SizePolicy::Fixed);
+    }
+
+    #[test]
+    fn test_layout_types_serde_round_trip() {
+        let props = WidgetProps {
+            layout_mode: LayoutMode::Row,
+            layout_gap: 12.0,
+            layout_cols: 3,
+            layout_align: Align::Center,
+            layout_justify: Justify::SpaceBetween,
+            layout_padding: [4.0, 8.0, 4.0, 8.0],
+            width_policy: SizePolicy::Percent(50.0),
+            height_policy: SizePolicy::Fill,
+            align_self: Some(Align::Stretch),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&props).unwrap();
+        let deserialized: WidgetProps = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.layout_mode, LayoutMode::Row);
+        assert_eq!(deserialized.layout_gap, 12.0);
+        assert_eq!(deserialized.layout_cols, 3);
+        assert_eq!(deserialized.layout_align, Align::Center);
+        assert_eq!(deserialized.layout_justify, Justify::SpaceBetween);
+        assert_eq!(deserialized.layout_padding, [4.0, 8.0, 4.0, 8.0]);
+        assert_eq!(deserialized.width_policy, SizePolicy::Percent(50.0));
+        assert_eq!(deserialized.height_policy, SizePolicy::Fill);
+        assert_eq!(deserialized.align_self, Some(Align::Stretch));
     }
 }
