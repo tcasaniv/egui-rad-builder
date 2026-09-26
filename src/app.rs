@@ -516,6 +516,100 @@ mod tests {
             "should emit window close"
         );
     }
+
+    // ─── Z-order / context menu helpers ────────────────────────────────────
+
+    fn make_widget(id: u64, z: i32, parent: Option<u64>) -> crate::widget::Widget {
+        crate::widget::Widget {
+            id: crate::widget::WidgetId::new(id),
+            kind: crate::widget::WidgetKind::Button,
+            pos: egui::pos2(0.0, 0.0),
+            size: egui::vec2(80.0, 24.0),
+            z,
+            area: crate::widget::DockArea::Center,
+            props: crate::widget::WidgetProps::default(),
+            parent: parent.map(crate::widget::WidgetId::new),
+        }
+    }
+
+    #[test]
+    fn test_move_up_down_siblings() {
+        let mut app = super::RadBuilderApp::default();
+        // Three siblings: z=1, z=2, z=3
+        app.project.widgets.push(make_widget(1, 1, None));
+        app.project.widgets.push(make_widget(2, 2, None));
+        app.project.widgets.push(make_widget(3, 3, None));
+
+        let id1 = crate::widget::WidgetId::new(1);
+        let id2 = crate::widget::WidgetId::new(2);
+
+        // move_widget_up(id1): should swap z with id2 (next above)
+        app.move_widget_up(id1);
+        let z1 = app.project.widgets.iter().find(|w| w.id == id1).unwrap().z;
+        let z2 = app.project.widgets.iter().find(|w| w.id == id2).unwrap().z;
+        assert_eq!(z1, 2, "id1 should have z=2 after moving up");
+        assert_eq!(z2, 1, "id2 should have z=1 after id1 moves up");
+
+        // move_widget_down(id1): should swap back with id2
+        app.move_widget_down(id1);
+        let z1 = app.project.widgets.iter().find(|w| w.id == id1).unwrap().z;
+        let z2 = app.project.widgets.iter().find(|w| w.id == id2).unwrap().z;
+        assert_eq!(z1, 1, "id1 should be back to z=1");
+        assert_eq!(z2, 2, "id2 should be back to z=2");
+    }
+
+    #[test]
+    fn test_bring_to_front_send_to_back() {
+        let mut app = super::RadBuilderApp::default();
+        app.project.widgets.push(make_widget(1, 10, None));
+        app.project.widgets.push(make_widget(2, 20, None));
+        app.project.widgets.push(make_widget(3, 30, None));
+
+        let id1 = crate::widget::WidgetId::new(1);
+        let id3 = crate::widget::WidgetId::new(3);
+
+        app.bring_to_front(id1);
+        let z1 = app.project.widgets.iter().find(|w| w.id == id1).unwrap().z;
+        assert_eq!(z1, 31, "bring_to_front should set z = max_sibling + 1");
+
+        app.send_to_back(id3);
+        let z3 = app.project.widgets.iter().find(|w| w.id == id3).unwrap().z;
+        // Siblings are id1=31, id2=20; min is 20, so z3 should be 19
+        assert_eq!(z3, 19, "send_to_back should set z = min_sibling - 1");
+    }
+
+    #[test]
+    fn test_context_action_toggle_visible() {
+        let mut app = super::RadBuilderApp::default();
+        app.project.widgets.push(make_widget(1, 1, None));
+        let id = crate::widget::WidgetId::new(1);
+        assert!(app.project.widgets[0].props.initially_visible);
+
+        app.apply_context_menu_action(super::ContextMenuAction::ToggleVisible(id));
+        assert!(!app.project.widgets[0].props.initially_visible, "should be hidden");
+
+        app.apply_context_menu_action(super::ContextMenuAction::ToggleVisible(id));
+        assert!(app.project.widgets[0].props.initially_visible, "should be visible again");
+    }
+
+    #[test]
+    fn test_context_action_copy_paste() {
+        let mut app = super::RadBuilderApp::default();
+        app.project.widgets.push(make_widget(1, 1, None));
+        let id = crate::widget::WidgetId::new(1);
+
+        assert!(app.clipboard.is_none());
+        app.apply_context_menu_action(super::ContextMenuAction::Copy(id));
+        assert!(app.clipboard.is_some(), "clipboard should have widget after Copy");
+
+        let count_before = app.project.widgets.len();
+        app.apply_context_menu_action(super::ContextMenuAction::Paste);
+        assert_eq!(
+            app.project.widgets.len(),
+            count_before + 1,
+            "Paste should add a new widget"
+        );
+    }
 }
 
 
@@ -541,6 +635,35 @@ impl Default for ActionDraft {
             code: String::new(),
         }
     }
+}
+
+/// Action selected from the Layers panel right-click context menu.
+/// Deferred to avoid borrow conflicts during tree rendering.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+enum ContextMenuAction {
+    Duplicate(WidgetId),
+    Copy(WidgetId),
+    Paste,
+    Delete(WidgetId),
+    ToggleVisible(WidgetId),
+    ToggleActive(WidgetId),
+    MoveUp(WidgetId),
+    MoveDown(WidgetId),
+    BringToFront(WidgetId),
+    SendToBack(WidgetId),
+    Reparent(WidgetId, Option<WidgetId>),
+}
+
+/// Zone within a Layers row where a dragged widget will be dropped.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum DragZone {
+    /// Insert before the target (above) — same parent, higher z.
+    Before,
+    /// Nest inside the target (only for containers).
+    Inside,
+    /// Insert after the target (below) — same parent, lower z.
+    After,
 }
 
 /// Interactive `eframe` application that owns the builder workspace.
@@ -593,6 +716,11 @@ pub struct RadBuilderApp {
     left_panel_tab: usize,
     /// Widget being dragged within the Layers panel for reorder
     layer_drag: Option<WidgetId>,
+    /// Drop zone detected during a layer D&D drag
+    layer_drag_zone: Option<DragZone>,
+    /// Pending context-menu action from Layers panel (deferred to avoid borrow conflicts)
+    #[allow(dead_code)]
+    context_menu_action: Option<ContextMenuAction>,
     /// Undo and redo history manager
     history: History,
     /// Draft state for configuring actions in the inspector
@@ -628,6 +756,8 @@ impl Default for RadBuilderApp {
             right_panel_tab: 0,
             left_panel_tab: 0,
             layer_drag: None,
+            layer_drag_zone: None,
+            context_menu_action: None,
             history: History::default(),
             action_draft: ActionDraft::default(),
         }
@@ -678,6 +808,121 @@ impl RadBuilderApp {
             }
             self.project.widgets.retain(|w| !to_delete.contains(&w.id));
             self.selected.clear();
+        }
+    }
+
+    // ── Z-order / Layer helpers ──────────────────────────────────────────────
+
+    /// Sorted (ascending z) list of siblings of `id` (same parent, excluding self).
+    fn siblings_of(&self, id: WidgetId) -> Vec<(WidgetId, i32)> {
+        let parent = self
+            .project
+            .widgets
+            .iter()
+            .find(|w| w.id == id)
+            .and_then(|w| w.parent);
+        let mut sibs: Vec<(WidgetId, i32)> = self
+            .project
+            .widgets
+            .iter()
+            .filter(|w| w.parent == parent && w.id != id)
+            .map(|w| (w.id, w.z))
+            .collect();
+        sibs.sort_by_key(|&(_, z)| z);
+        sibs
+    }
+
+    /// Swap z with the next sibling above (higher z = higher in Layers list).
+    fn move_widget_up(&mut self, id: WidgetId) {
+        let my_z = match self.project.widgets.iter().find(|w| w.id == id) {
+            Some(w) => w.z,
+            None => return,
+        };
+        let sibs = self.siblings_of(id);
+        if let Some(&(sib_id, sib_z)) = sibs.iter().find(|&&(_, z)| z > my_z) {
+            self.push_undo();
+            if let Some(w) = self.project.widgets.iter_mut().find(|w| w.id == id) {
+                w.z = sib_z;
+            }
+            if let Some(w) = self.project.widgets.iter_mut().find(|w| w.id == sib_id) {
+                w.z = my_z;
+            }
+        }
+    }
+
+    /// Swap z with the next sibling below (lower z = lower in Layers list).
+    fn move_widget_down(&mut self, id: WidgetId) {
+        let my_z = match self.project.widgets.iter().find(|w| w.id == id) {
+            Some(w) => w.z,
+            None => return,
+        };
+        let sibs = self.siblings_of(id);
+        if let Some(&(sib_id, sib_z)) = sibs.iter().rev().find(|&&(_, z)| z < my_z) {
+            self.push_undo();
+            if let Some(w) = self.project.widgets.iter_mut().find(|w| w.id == id) {
+                w.z = sib_z;
+            }
+            if let Some(w) = self.project.widgets.iter_mut().find(|w| w.id == sib_id) {
+                w.z = my_z;
+            }
+        }
+    }
+
+    /// Set z above the highest sibling.
+    fn bring_to_front(&mut self, id: WidgetId) {
+        let sibs = self.siblings_of(id);
+        if let Some(&(_, max_z)) = sibs.iter().max_by_key(|&&(_, z)| z) {
+            self.push_undo();
+            if let Some(w) = self.project.widgets.iter_mut().find(|w| w.id == id) {
+                w.z = max_z + 1;
+            }
+        }
+    }
+
+    /// Set z below the lowest sibling.
+    fn send_to_back(&mut self, id: WidgetId) {
+        let sibs = self.siblings_of(id);
+        if let Some(&(_, min_z)) = sibs.iter().min_by_key(|&&(_, z)| z) {
+            self.push_undo();
+            if let Some(w) = self.project.widgets.iter_mut().find(|w| w.id == id) {
+                w.z = min_z - 1;
+            }
+        }
+    }
+
+    /// Apply a deferred context-menu action from the Layers panel.
+    fn apply_context_menu_action(&mut self, action: ContextMenuAction) {
+        match action {
+            ContextMenuAction::Duplicate(id) => {
+                self.selected = vec![id];
+                self.duplicate_selected();
+            }
+            ContextMenuAction::Copy(id) => {
+                self.clipboard = self.project.widgets.iter().find(|w| w.id == id).cloned();
+                self.set_status(format!("Copied widget #{id}"));
+            }
+            ContextMenuAction::Paste => self.paste(),
+            ContextMenuAction::Delete(id) => {
+                self.selected = vec![id];
+                self.delete_selected();
+            }
+            ContextMenuAction::ToggleVisible(id) => {
+                self.push_undo();
+                if let Some(w) = self.project.widgets.iter_mut().find(|w| w.id == id) {
+                    w.props.initially_visible = !w.props.initially_visible;
+                }
+            }
+            ContextMenuAction::ToggleActive(id) => {
+                self.push_undo();
+                if let Some(w) = self.project.widgets.iter_mut().find(|w| w.id == id) {
+                    w.props.active = !w.props.active;
+                }
+            }
+            ContextMenuAction::MoveUp(id)       => self.move_widget_up(id),
+            ContextMenuAction::MoveDown(id)     => self.move_widget_down(id),
+            ContextMenuAction::BringToFront(id) => self.bring_to_front(id),
+            ContextMenuAction::SendToBack(id)   => self.send_to_back(id),
+            ContextMenuAction::Reparent(id, p)  => self.reparent_widget(id, p),
         }
     }
 
@@ -2120,6 +2365,8 @@ impl RadBuilderApp {
             let mut reparent_action: Option<(WidgetId, Option<WidgetId>)> = None;
             let mut z_reorder_action: Option<(WidgetId, i32)> = None;
             let mut undo_needed = false;
+            let mut ctx_action: Option<ContextMenuAction> = None;
+            let clipboard_has_widget = self.clipboard.is_some();
 
             egui::ScrollArea::vertical()
                 .id_salt("layers_scroll")
@@ -2173,12 +2420,15 @@ impl RadBuilderApp {
                             &mut reparent_action,
                             &mut z_reorder_action,
                             &mut undo_needed,
+                            &mut ctx_action,
+                            clipboard_has_widget,
                         );
                     }
 
                     // Clear drag state if mouse released anywhere
                     if ui.input(|i| i.pointer.any_released()) {
                         self.layer_drag = None;
+                        self.layer_drag_zone = None;
                     }
                 });
 
@@ -2193,6 +2443,10 @@ impl RadBuilderApp {
                     w.z = new_z;
                 }
             }
+            // Apply any deferred context-menu action last (avoids borrow conflicts)
+            if let Some(action) = ctx_action {
+                self.apply_context_menu_action(action);
+            }
         });
     }
 
@@ -2204,6 +2458,8 @@ impl RadBuilderApp {
         reparent_action: &mut Option<(WidgetId, Option<WidgetId>)>,
         z_reorder_action: &mut Option<(WidgetId, i32)>,
         undo_needed: &mut bool,
+        ctx_action: &mut Option<ContextMenuAction>,
+        clipboard_has_widget: bool,
     ) {
         let Some(idx) = self.project.widgets.iter().position(|w| w.id == wid) else {
             return;
@@ -2233,6 +2489,7 @@ impl RadBuilderApp {
             list.into_iter().map(|(id, _)| id).collect()
         };
 
+        // ── Row ──────────────────────────────────────────────────────────────
         let row_resp = ui.horizontal(|ui| {
             // Indentation
             if depth > 0 {
@@ -2253,7 +2510,7 @@ impl RadBuilderApp {
                 self.project.widgets[idx].props.active = !active;
             }
 
-            // Starts visible toggle
+            // Starts-visible toggle
             let vis_btn = ui
                 .add_enabled(
                     active,
@@ -2280,17 +2537,15 @@ impl RadBuilderApp {
                 format!("~~{label}~~")
             };
 
+            // Drag handle + selection label
             let row = ui.selectable_label(
                 is_selected,
                 format!("⣿ {}{}", container_icon, label_text),
             );
 
-            // Drag handle to reparent/reorder
             if row.drag_started() {
                 self.layer_drag = Some(wid);
             }
-
-            // Click to select
             if row.clicked() {
                 let shift = ui.input(|i| i.modifiers.shift);
                 if shift {
@@ -2303,36 +2558,150 @@ impl RadBuilderApp {
                     self.selected = vec![wid];
                 }
             }
+
+            // ── ⬆/⬇ buttons (right-aligned) ─────────────────────────────────
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("⬇").on_hover_text("Bajar una posición").clicked() {
+                    *ctx_action = Some(ContextMenuAction::MoveDown(wid));
+                }
+                if ui.small_button("⬆").on_hover_text("Subir una posición").clicked() {
+                    *ctx_action = Some(ContextMenuAction::MoveUp(wid));
+                }
+            });
         });
 
-        // Hover drop target to nest inside container or reorder
+        // ── Context menu (right-click on the row) ────────────────────────────
+        row_resp.response.context_menu(|ui| {
+            ui.set_min_width(190.0);
+
+            if ui.button("⧉  Duplicar").clicked() {
+                *ctx_action = Some(ContextMenuAction::Duplicate(wid));
+                ui.close_kind(egui::UiKind::Menu);
+            }
+            if ui.button("📋  Copiar").clicked() {
+                *ctx_action = Some(ContextMenuAction::Copy(wid));
+                ui.close_kind(egui::UiKind::Menu);
+            }
+            ui.add_enabled_ui(clipboard_has_widget, |ui| {
+                if ui.button("📌  Pegar").clicked() {
+                    *ctx_action = Some(ContextMenuAction::Paste);
+                    ui.close_kind(egui::UiKind::Menu);
+                }
+            });
+            ui.separator();
+            if ui.button("🗑  Eliminar").clicked() {
+                *ctx_action = Some(ContextMenuAction::Delete(wid));
+                ui.close_kind(egui::UiKind::Menu);
+            }
+            ui.separator();
+            let vis_label = if init_vis { "🙈  Ocultar al inicio" } else { "👁  Mostrar al inicio" };
+            if ui.button(vis_label).clicked() {
+                *ctx_action = Some(ContextMenuAction::ToggleVisible(wid));
+                ui.close_kind(egui::UiKind::Menu);
+            }
+            let act_label = if active { "🚫  Desactivar" } else { "✅  Activar" };
+            if ui.button(act_label).clicked() {
+                *ctx_action = Some(ContextMenuAction::ToggleActive(wid));
+                ui.close_kind(egui::UiKind::Menu);
+            }
+            ui.separator();
+            if ui.button("⬆  Subir").clicked() {
+                *ctx_action = Some(ContextMenuAction::MoveUp(wid));
+                ui.close_kind(egui::UiKind::Menu);
+            }
+            if ui.button("⬇  Bajar").clicked() {
+                *ctx_action = Some(ContextMenuAction::MoveDown(wid));
+                ui.close_kind(egui::UiKind::Menu);
+            }
+            if ui.button("⏫  Traer al frente").clicked() {
+                *ctx_action = Some(ContextMenuAction::BringToFront(wid));
+                ui.close_kind(egui::UiKind::Menu);
+            }
+            if ui.button("⏬  Enviar al fondo").clicked() {
+                *ctx_action = Some(ContextMenuAction::SendToBack(wid));
+                ui.close_kind(egui::UiKind::Menu);
+            }
+        });
+
+        // ── Improved D&D with 3-zone insertion indicator ─────────────────────
         if let Some(dragged_id) = self.layer_drag {
             if dragged_id != wid && !self.project.is_descendant_of(wid, dragged_id) {
+                let rect = row_resp.response.rect;
+                let top_thresh = rect.min.y + rect.height() * 0.28;
+                let bot_thresh = rect.max.y - rect.height() * 0.28;
+                let pointer_y = ui.input(|i| i.pointer.hover_pos()).map(|p| p.y);
+
                 if row_resp.response.hovered() {
-                    ui.painter().rect_stroke(
-                        row_resp.response.rect,
-                        egui::CornerRadius::same(2),
-                        egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
-                        egui::StrokeKind::Outside,
-                    );
-                    if ui.input(|i| i.pointer.any_released()) {
-                        if is_container {
-                            // Drop onto a container nests it as a child!
-                            *reparent_action = Some((dragged_id, Some(wid)));
-                            *undo_needed = true;
+                    if let Some(py) = pointer_y {
+                        let zone = if py < top_thresh {
+                            DragZone::Before
+                        } else if py > bot_thresh && is_container {
+                            // Show AFTER only when container; otherwise treat bottom as Before too
+                            DragZone::After
+                        } else if is_container {
+                            DragZone::Inside
+                        } else if py < rect.center().y {
+                            DragZone::Before
                         } else {
-                            // Drop onto a sibling adjusts z order
-                            let parent_of_target = self.project.widgets[idx].parent;
-                            *reparent_action = Some((dragged_id, parent_of_target));
-                            *z_reorder_action = Some((dragged_id, current_z + 1));
-                            *undo_needed = true;
+                            DragZone::After
+                        };
+                        self.layer_drag_zone = Some(zone);
+
+                        let painter = ui.painter();
+                        match zone {
+                            DragZone::Before => {
+                                painter.hline(
+                                    rect.x_range(),
+                                    rect.min.y,
+                                    egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
+                                );
+                            }
+                            DragZone::After => {
+                                painter.hline(
+                                    rect.x_range(),
+                                    rect.max.y,
+                                    egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
+                                );
+                            }
+                            DragZone::Inside => {
+                                painter.rect_stroke(
+                                    rect,
+                                    egui::CornerRadius::same(2),
+                                    egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
+                                    egui::StrokeKind::Outside,
+                                );
+                            }
+                        }
+
+                        if ui.input(|i| i.pointer.any_released()) {
+                            match zone {
+                                DragZone::Before => {
+                                    // Same parent as target, z = target.z + 1
+                                    let target_parent = self.project.widgets[idx].parent;
+                                    *reparent_action = Some((dragged_id, target_parent));
+                                    *z_reorder_action = Some((dragged_id, current_z + 1));
+                                    *undo_needed = true;
+                                }
+                                DragZone::Inside => {
+                                    // Nest inside container
+                                    *reparent_action = Some((dragged_id, Some(wid)));
+                                    *undo_needed = true;
+                                }
+                                DragZone::After => {
+                                    // Same parent as target, z = target.z - 1
+                                    let target_parent = self.project.widgets[idx].parent;
+                                    *reparent_action = Some((dragged_id, target_parent));
+                                    *z_reorder_action = Some((dragged_id, current_z - 1));
+                                    *undo_needed = true;
+                                }
+                            }
                         }
                     }
                 }
             }
         }
 
-        // Render children indented
+        // ── Render children indented ──────────────────────────────────────────
         for child_id in children_ids {
             self.render_layer_tree_node(
                 ui,
@@ -2341,6 +2710,8 @@ impl RadBuilderApp {
                 reparent_action,
                 z_reorder_action,
                 undo_needed,
+                ctx_action,
+                clipboard_has_widget,
             );
         }
     }
