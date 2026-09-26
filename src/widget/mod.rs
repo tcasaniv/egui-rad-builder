@@ -707,6 +707,27 @@ pub(crate) struct WidgetProps {
     /// `None` means inherit from parent container's `layout_align`.
     #[serde(default)]
     pub(crate) align_self: Option<Align>,
+
+    // ── TabBar child configuration ─────────────────────────────────────────
+    /// For widgets that are children of a TabBar container:
+    /// indicates which tab page index this widget belongs to.
+    /// `None` = visible on all tabs.
+    #[serde(default)]
+    pub(crate) tab_page: Option<usize>,
+
+    // ── Auto-sizing ────────────────────────────────────────────────────────
+    /// Auto-adjust container height to wrap all its children + padding (`fit-content`).
+    #[serde(default = "widget_prop_default_true")]
+    pub(crate) auto_size_y: bool,
+
+    // ── Responsive configuration ───────────────────────────────────────────
+    /// Conditional visibility based on screen orientation/breakpoint.
+    #[serde(default)]
+    pub(crate) responsive_vis: ResponsiveVisibility,
+
+    /// Adaptive layout rule for containers.
+    #[serde(default)]
+    pub(crate) responsive_layout: ResponsiveLayout,
 }
 
 fn widget_prop_default_true() -> bool {
@@ -753,6 +774,10 @@ impl Default for WidgetProps {
             width_policy: SizePolicy::Fixed,
             height_policy: SizePolicy::Fixed,
             align_self: None,
+            tab_page: None,
+            auto_size_y: true,
+            responsive_vis: ResponsiveVisibility::Always,
+            responsive_layout: ResponsiveLayout::None,
         }
     }
 }
@@ -763,6 +788,98 @@ pub(crate) fn snap_pos_with_grid(p: Pos2, grid: f32) -> Pos2 {
 
 pub(crate) fn escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+// ── Responsive system ─────────────────────────────────────────────────────────
+
+/// Conditional visibility rules based on screen orientation / breakpoints.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub(crate) enum ResponsiveVisibility {
+    /// Always visible regardless of screen format.
+    #[default]
+    Always,
+    /// Visible only when height > width (portrait / vertical mobile).
+    PortraitOnly,
+    /// Visible only when width >= height (landscape / desktop / horizontal mobile).
+    LandscapeOnly,
+    /// Visible only when width <= 600px (mobile breakpoint).
+    MobileOnly,
+    /// Visible only when width > 600px (desktop/tablet breakpoint).
+    DesktopOnly,
+}
+
+#[allow(dead_code)]
+impl ResponsiveVisibility {
+    pub(crate) const fn display_name(self) -> &'static str {
+        match self {
+            Self::Always        => "Always",
+            Self::PortraitOnly  => "Portrait Only (Vertical)",
+            Self::LandscapeOnly => "Landscape Only (Horizontal)",
+            Self::MobileOnly    => "Mobile Only (<= 600px)",
+            Self::DesktopOnly   => "Desktop Only (> 600px)",
+        }
+    }
+
+    pub(crate) const fn all() -> &'static [ResponsiveVisibility] {
+        &[
+            Self::Always,
+            Self::PortraitOnly,
+            Self::LandscapeOnly,
+            Self::MobileOnly,
+            Self::DesktopOnly,
+        ]
+    }
+
+    /// Evaluates if this visibility rule is satisfied given the canvas/window size.
+    pub(crate) fn is_visible(self, size: egui::Vec2) -> bool {
+        match self {
+            Self::Always => true,
+            Self::PortraitOnly => size.y > size.x,
+            Self::LandscapeOnly => size.x >= size.y,
+            Self::MobileOnly => size.x <= 600.0,
+            Self::DesktopOnly => size.x > 600.0,
+        }
+    }
+}
+
+/// Adaptive layout behaviour for containers depending on screen orientation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub(crate) enum ResponsiveLayout {
+    /// Do not adapt layout mode automatically.
+    #[default]
+    None,
+    /// Acts as `Row` in Landscape, but switches automatically to `Column` in Portrait.
+    RowToColumnOnPortrait,
+}
+
+#[allow(dead_code)]
+impl ResponsiveLayout {
+    pub(crate) const fn display_name(self) -> &'static str {
+        match self {
+            Self::None => "None (keep assigned mode)",
+            Self::RowToColumnOnPortrait => "Row in Landscape -> Column in Portrait",
+        }
+    }
+
+    pub(crate) const fn all() -> &'static [ResponsiveLayout] {
+        &[Self::None, Self::RowToColumnOnPortrait]
+    }
+
+    /// Determines the effective layout mode given the base mode and canvas size.
+    pub(crate) fn resolve_mode(self, base: LayoutMode, canvas_size: egui::Vec2) -> LayoutMode {
+        match self {
+            Self::None => base,
+            Self::RowToColumnOnPortrait => {
+                if canvas_size.y > canvas_size.x {
+                    // Vertical (portrait): stack vertically
+                    LayoutMode::Column
+                } else {
+                    // Horizontal (landscape): arrange horizontally
+                    LayoutMode::Row
+                }
+            }
+        }
+    }
 }
 
 // ── Layout system ─────────────────────────────────────────────────────────────
@@ -1318,5 +1435,41 @@ mod tests {
         assert_eq!(deserialized.width_policy, SizePolicy::Percent(50.0));
         assert_eq!(deserialized.height_policy, SizePolicy::Fill);
         assert_eq!(deserialized.align_self, Some(Align::Stretch));
+    }
+
+    #[test]
+    fn test_responsive_types_serde_and_logic() {
+        let props = WidgetProps {
+            tab_page: Some(2),
+            auto_size_y: false,
+            responsive_vis: ResponsiveVisibility::PortraitOnly,
+            responsive_layout: ResponsiveLayout::RowToColumnOnPortrait,
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&props).unwrap();
+        let deserialized: WidgetProps = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.tab_page, Some(2));
+        assert!(!deserialized.auto_size_y);
+        assert_eq!(deserialized.responsive_vis, ResponsiveVisibility::PortraitOnly);
+        assert_eq!(deserialized.responsive_layout, ResponsiveLayout::RowToColumnOnPortrait);
+
+        // Test visibility logic
+        let portrait = egui::vec2(390.0, 844.0);
+        let landscape = egui::vec2(844.0, 390.0);
+        assert!(ResponsiveVisibility::PortraitOnly.is_visible(portrait));
+        assert!(!ResponsiveVisibility::PortraitOnly.is_visible(landscape));
+        assert!(!ResponsiveVisibility::LandscapeOnly.is_visible(portrait));
+        assert!(ResponsiveVisibility::LandscapeOnly.is_visible(landscape));
+
+        // Test responsive layout logic
+        assert_eq!(
+            ResponsiveLayout::RowToColumnOnPortrait.resolve_mode(LayoutMode::Row, portrait),
+            LayoutMode::Column
+        );
+        assert_eq!(
+            ResponsiveLayout::RowToColumnOnPortrait.resolve_mode(LayoutMode::Row, landscape),
+            LayoutMode::Row
+        );
     }
 }
