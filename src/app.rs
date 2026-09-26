@@ -610,6 +610,132 @@ mod tests {
             "Paste should add a new widget"
         );
     }
+
+    // ─── Auto-layout tests ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_compute_auto_layout_row_fixed_and_percent_and_fill() {
+        use crate::widget::{Align, Justify, LayoutMode, SizePolicy, WidgetId};
+
+        let container_size = egui::vec2(300.0, 100.0);
+        let gap = 10.0;
+        let padding = [0.0; 4];
+
+        let children = vec![
+            // Child 1: Fixed 50px
+            (WidgetId::new(1), egui::vec2(50.0, 30.0), SizePolicy::Fixed, SizePolicy::Fixed, None),
+            // Child 2: 50% of available (300px * 0.5 = 150px)
+            (WidgetId::new(2), egui::vec2(10.0, 40.0), SizePolicy::Percent(50.0), SizePolicy::Fixed, None),
+            // Child 3: Fill remainder (300 - 50 - 150 - 20gap = 80px)
+            (WidgetId::new(3), egui::vec2(10.0, 50.0), SizePolicy::Fill, SizePolicy::Fixed, None),
+        ];
+
+        let rects = super::RadBuilderApp::compute_auto_layout(
+            container_size,
+            LayoutMode::Row,
+            gap,
+            2,
+            Align::Start,
+            Justify::Start,
+            padding,
+            &children,
+        );
+
+        assert_eq!(rects.len(), 3);
+        // Child 1
+        assert_eq!(rects[0].0, WidgetId::new(1));
+        assert_eq!(rects[0].1.min.x, 0.0);
+        assert_eq!(rects[0].1.width(), 50.0);
+
+        // Child 2
+        assert_eq!(rects[1].0, WidgetId::new(2));
+        assert_eq!(rects[1].1.min.x, 60.0); // 50 + 10gap
+        assert_eq!(rects[1].1.width(), 150.0);
+
+        // Child 3
+        assert_eq!(rects[2].0, WidgetId::new(3));
+        assert_eq!(rects[2].1.min.x, 220.0); // 60 + 150 + 10gap
+        assert_eq!(rects[2].1.width(), 80.0);
+    }
+
+    #[test]
+    fn test_compute_auto_layout_column_justify_center() {
+        use crate::widget::{Align, Justify, LayoutMode, SizePolicy, WidgetId};
+
+        let container_size = egui::vec2(100.0, 200.0);
+        let gap = 10.0;
+        let padding = [0.0; 4];
+
+        let children = vec![
+            (WidgetId::new(1), egui::vec2(80.0, 40.0), SizePolicy::Fixed, SizePolicy::Fixed, None),
+            (WidgetId::new(2), egui::vec2(80.0, 50.0), SizePolicy::Fixed, SizePolicy::Fixed, None),
+        ];
+        // Total height = 40 + 50 + 10 = 100. Spare = 100.
+        // Justify::Center offset = 50.
+
+        let rects = super::RadBuilderApp::compute_auto_layout(
+            container_size,
+            LayoutMode::Column,
+            gap,
+            1,
+            Align::Center,
+            Justify::Center,
+            padding,
+            &children,
+        );
+
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0].1.min.y, 50.0);
+        assert_eq!(rects[1].1.min.y, 100.0); // 50 + 40 + 10
+        // Cross axis centered: width is 80, container is 100 -> x = (100 - 80) / 2 = 10
+        assert_eq!(rects[0].1.min.x, 10.0);
+        assert_eq!(rects[1].1.min.x, 10.0);
+    }
+
+    #[test]
+    fn test_codegen_group_with_row_and_grid_layout() {
+        use crate::widget::{Justify, LayoutMode, WidgetKind};
+
+        let mut app = super::RadBuilderApp::default();
+        let mut group = make_widget(10, 1, None);
+        group.kind = WidgetKind::Group;
+        group.props.layout_mode = LayoutMode::Row;
+        group.props.layout_gap = 16.0;
+        group.props.layout_justify = Justify::Center;
+
+        let mut btn1 = make_widget(11, 1, Some(10));
+        btn1.props.text = "Btn1".into();
+
+        let mut btn2 = make_widget(12, 2, Some(10));
+        btn2.props.text = "Btn2".into();
+
+        app.project.widgets.push(group);
+        app.project.widgets.push(btn1);
+        app.project.widgets.push(btn2);
+
+        let code = app.generate_single_file();
+        assert!(code.contains("ui.with_layout(egui::Layout::left_to_right(egui::Align::Center)"), "should emit row with justify");
+        assert!(code.contains("ui.add_space(16.0);"), "should emit gap space");
+
+        // Now test Grid
+        let mut app_grid = super::RadBuilderApp::default();
+        let mut grid_group = make_widget(20, 1, None);
+        grid_group.kind = WidgetKind::Group;
+        grid_group.props.layout_mode = LayoutMode::Grid;
+        grid_group.props.layout_cols = 2;
+        grid_group.props.layout_gap = 8.0;
+
+        let child1 = make_widget(21, 1, Some(20));
+        let child2 = make_widget(22, 2, Some(20));
+
+        app_grid.project.widgets.push(grid_group);
+        app_grid.project.widgets.push(child1);
+        app_grid.project.widgets.push(child2);
+
+        let grid_code = app_grid.generate_single_file();
+        assert!(grid_code.contains("egui::Grid::new(\"grid_20\").num_columns(2)"), "should emit grid with 2 columns");
+        assert!(grid_code.contains("ui.end_row();"), "should emit end_row");
+    }
 }
 
 
@@ -1584,6 +1710,270 @@ impl RadBuilderApp {
         }
     }
 
+    /// Computes relative bounding rects for children in an auto-layout container.
+    /// Returns a list of (WidgetId, Rect) with positions relative to the container inner origin (0, 0).
+    pub(crate) fn compute_auto_layout(
+        container_size: egui::Vec2,
+        mode: LayoutMode,
+        gap: f32,
+        cols: usize,
+        align: Align,
+        justify: Justify,
+        padding: [f32; 4],
+        children_props: &[(WidgetId, egui::Vec2, SizePolicy, SizePolicy, Option<Align>)],
+    ) -> Vec<(WidgetId, Rect)> {
+        let mut results = Vec::new();
+        if children_props.is_empty() {
+            return results;
+        }
+
+        let pad_top = padding[0];
+        let pad_right = padding[1];
+        let pad_bottom = padding[2];
+        let pad_left = padding[3];
+
+        let avail_w = (container_size.x - pad_left - pad_right).max(0.0);
+        let avail_h = (container_size.y - pad_top - pad_bottom).max(0.0);
+
+        match mode {
+            LayoutMode::Free => {
+                // Not used here
+            }
+            LayoutMode::Row => {
+                let n = children_props.len();
+                let total_gaps = gap * (n.saturating_sub(1) as f32);
+                let mut fixed_w_total = 0.0;
+                let mut fill_count = 0;
+
+                for &(_, sz, w_pol, _, _) in children_props {
+                    match w_pol {
+                        SizePolicy::Fixed => fixed_w_total += sz.x,
+                        SizePolicy::Percent(p) => fixed_w_total += (avail_w * (p / 100.0)).max(0.0),
+                        SizePolicy::Fill => fill_count += 1,
+                    }
+                }
+
+                let remaining_w = (avail_w - fixed_w_total - total_gaps).max(0.0);
+                let fill_unit_w = if fill_count > 0 { remaining_w / fill_count as f32 } else { 0.0 };
+
+                let total_content_w = fixed_w_total + (fill_unit_w * fill_count as f32) + total_gaps;
+                let spare_main = (avail_w - total_content_w).max(0.0);
+
+                let (start_offset_x, gap_stride) = match justify {
+                    Justify::Start => (0.0, gap),
+                    Justify::Center => (spare_main / 2.0, gap),
+                    Justify::End => (spare_main, gap),
+                    Justify::SpaceBetween => {
+                        let dynamic_gap = if n > 1 { (avail_w - (total_content_w - total_gaps)) / (n - 1) as f32 } else { 0.0 };
+                        (0.0, dynamic_gap)
+                    }
+                    Justify::SpaceAround => {
+                        let unit = if n > 0 { spare_main / (n as f32 * 2.0) } else { 0.0 };
+                        (unit, gap + unit * 2.0)
+                    }
+                    Justify::SpaceEvenly => {
+                        let unit = if n > 0 { spare_main / (n as f32 + 1.0) } else { 0.0 };
+                        (unit, gap + unit)
+                    }
+                };
+
+                let mut current_x = pad_left + start_offset_x;
+                for &(cid, sz, w_pol, h_pol, self_align) in children_props {
+                    let w = match w_pol {
+                        SizePolicy::Fixed => sz.x,
+                        SizePolicy::Percent(p) => (avail_w * (p / 100.0)).max(0.0),
+                        SizePolicy::Fill => fill_unit_w,
+                    };
+
+                    let effective_align = self_align.unwrap_or(align);
+                    let (y, h) = match effective_align {
+                        Align::Start => {
+                            let h = match h_pol {
+                                SizePolicy::Fixed => sz.y,
+                                SizePolicy::Percent(p) => (avail_h * (p / 100.0)).max(0.0),
+                                SizePolicy::Fill => avail_h,
+                            };
+                            (pad_top, h)
+                        }
+                        Align::Center => {
+                            let h = match h_pol {
+                                SizePolicy::Fixed => sz.y,
+                                SizePolicy::Percent(p) => (avail_h * (p / 100.0)).max(0.0),
+                                SizePolicy::Fill => avail_h,
+                            };
+                            let y = pad_top + (avail_h - h).max(0.0) / 2.0;
+                            (y, h)
+                        }
+                        Align::End => {
+                            let h = match h_pol {
+                                SizePolicy::Fixed => sz.y,
+                                SizePolicy::Percent(p) => (avail_h * (p / 100.0)).max(0.0),
+                                SizePolicy::Fill => avail_h,
+                            };
+                            let y = pad_top + (avail_h - h).max(0.0);
+                            (y, h)
+                        }
+                        Align::Stretch => {
+                            (pad_top, avail_h)
+                        }
+                    };
+
+                    results.push((cid, Rect::from_min_size(pos2(current_x, y), vec2(w, h))));
+                    current_x += w + gap_stride;
+                }
+            }
+            LayoutMode::Column => {
+                let n = children_props.len();
+                let total_gaps = gap * (n.saturating_sub(1) as f32);
+                let mut fixed_h_total = 0.0;
+                let mut fill_count = 0;
+
+                for &(_, sz, _, h_pol, _) in children_props {
+                    match h_pol {
+                        SizePolicy::Fixed => fixed_h_total += sz.y,
+                        SizePolicy::Percent(p) => fixed_h_total += (avail_h * (p / 100.0)).max(0.0),
+                        SizePolicy::Fill => fill_count += 1,
+                    }
+                }
+
+                let remaining_h = (avail_h - fixed_h_total - total_gaps).max(0.0);
+                let fill_unit_h = if fill_count > 0 { remaining_h / fill_count as f32 } else { 0.0 };
+
+                let total_content_h = fixed_h_total + (fill_unit_h * fill_count as f32) + total_gaps;
+                let spare_main = (avail_h - total_content_h).max(0.0);
+
+                let (start_offset_y, gap_stride) = match justify {
+                    Justify::Start => (0.0, gap),
+                    Justify::Center => (spare_main / 2.0, gap),
+                    Justify::End => (spare_main, gap),
+                    Justify::SpaceBetween => {
+                        let dynamic_gap = if n > 1 { (avail_h - (total_content_h - total_gaps)) / (n - 1) as f32 } else { 0.0 };
+                        (0.0, dynamic_gap)
+                    }
+                    Justify::SpaceAround => {
+                        let unit = if n > 0 { spare_main / (n as f32 * 2.0) } else { 0.0 };
+                        (unit, gap + unit * 2.0)
+                    }
+                    Justify::SpaceEvenly => {
+                        let unit = if n > 0 { spare_main / (n as f32 + 1.0) } else { 0.0 };
+                        (unit, gap + unit)
+                    }
+                };
+
+                let mut current_y = pad_top + start_offset_y;
+                for &(cid, sz, w_pol, h_pol, self_align) in children_props {
+                    let h = match h_pol {
+                        SizePolicy::Fixed => sz.y,
+                        SizePolicy::Percent(p) => (avail_h * (p / 100.0)).max(0.0),
+                        SizePolicy::Fill => fill_unit_h,
+                    };
+
+                    let effective_align = self_align.unwrap_or(align);
+                    let (x, w) = match effective_align {
+                        Align::Start => {
+                            let w = match w_pol {
+                                SizePolicy::Fixed => sz.x,
+                                SizePolicy::Percent(p) => (avail_w * (p / 100.0)).max(0.0),
+                                SizePolicy::Fill => avail_w,
+                            };
+                            (pad_left, w)
+                        }
+                        Align::Center => {
+                            let w = match w_pol {
+                                SizePolicy::Fixed => sz.x,
+                                SizePolicy::Percent(p) => (avail_w * (p / 100.0)).max(0.0),
+                                SizePolicy::Fill => avail_w,
+                            };
+                            let x = pad_left + (avail_w - w).max(0.0) / 2.0;
+                            (x, w)
+                        }
+                        Align::End => {
+                            let w = match w_pol {
+                                SizePolicy::Fixed => sz.x,
+                                SizePolicy::Percent(p) => (avail_w * (p / 100.0)).max(0.0),
+                                SizePolicy::Fill => avail_w,
+                            };
+                            let x = pad_left + (avail_w - w).max(0.0);
+                            (x, w)
+                        }
+                        Align::Stretch => {
+                            (pad_left, avail_w)
+                        }
+                    };
+
+                    results.push((cid, Rect::from_min_size(pos2(x, current_y), vec2(w, h))));
+                    current_y += h + gap_stride;
+                }
+            }
+            LayoutMode::WrapRow => {
+                let mut current_x = pad_left;
+                let mut current_y = pad_top;
+                let mut row_h: f32 = 0.0;
+
+                for &(cid, sz, w_pol, h_pol, _) in children_props {
+                    let w = match w_pol {
+                        SizePolicy::Fixed => sz.x,
+                        SizePolicy::Percent(p) => (avail_w * (p / 100.0)).max(0.0),
+                        SizePolicy::Fill => sz.x,
+                    };
+                    let h = match h_pol {
+                        SizePolicy::Fixed => sz.y,
+                        SizePolicy::Percent(p) => (avail_h * (p / 100.0)).max(0.0),
+                        SizePolicy::Fill => sz.y,
+                    };
+
+                    if current_x + w > pad_left + avail_w && current_x > pad_left {
+                        current_x = pad_left;
+                        current_y += row_h + gap;
+                        row_h = 0.0;
+                    }
+
+                    results.push((cid, Rect::from_min_size(pos2(current_x, current_y), vec2(w, h))));
+                    current_x += w + gap;
+                    row_h = row_h.max(h);
+                }
+            }
+            LayoutMode::Grid => {
+                let num_cols = cols.max(1);
+                let total_gaps = gap * (num_cols.saturating_sub(1) as f32);
+                let cell_w = ((avail_w - total_gaps) / num_cols as f32).max(10.0);
+
+                let mut row_idx = 0;
+                let mut col_idx = 0;
+                let mut row_y = pad_top;
+                let mut current_row_max_h: f32 = 0.0;
+
+                for &(cid, sz, w_pol, h_pol, _) in children_props {
+                    let w = match w_pol {
+                        SizePolicy::Fixed => sz.x.min(cell_w),
+                        SizePolicy::Percent(p) => (cell_w * (p / 100.0)).max(0.0),
+                        SizePolicy::Fill => cell_w,
+                    };
+                    let h = match h_pol {
+                        SizePolicy::Fixed => sz.y,
+                        SizePolicy::Percent(p) => (avail_h * (p / 100.0)).max(0.0),
+                        SizePolicy::Fill => sz.y,
+                    };
+
+                    let cell_x = pad_left + (col_idx as f32) * (cell_w + gap);
+                    results.push((cid, Rect::from_min_size(pos2(cell_x, row_y), vec2(w, h))));
+
+                    current_row_max_h = current_row_max_h.max(h);
+                    col_idx += 1;
+                    if col_idx >= num_cols {
+                        col_idx = 0;
+                        row_idx += 1;
+                        row_y += current_row_max_h + gap;
+                        current_row_max_h = 0.0;
+                    }
+                }
+                let _ = row_idx;
+            }
+        }
+
+        results
+    }
+
     fn draw_widget_tree(
         ui: &mut egui::Ui,
         container_rect: Rect,
@@ -1661,8 +2051,41 @@ impl RadBuilderApp {
                 .collect();
             children.sort_by_key(|&(_, z)| z);
 
-            for (cid, _) in children {
-                Self::draw_widget_tree(ui, inner_rect, grid_size, selected, cid, widgets, triggered);
+            if w.props.layout_mode == LayoutMode::Free {
+                for (cid, _) in children {
+                    Self::draw_widget_tree(ui, inner_rect, grid_size, selected, cid, widgets, triggered);
+                }
+            } else {
+                let children_info: Vec<(WidgetId, egui::Vec2, SizePolicy, SizePolicy, Option<Align>)> = children
+                    .iter()
+                    .filter_map(|&(cid, _)| {
+                        widgets.iter().find(|x| x.id == cid).map(|cw| {
+                            (cw.id, cw.size, cw.props.width_policy, cw.props.height_policy, cw.props.align_self)
+                        })
+                    })
+                    .collect();
+
+                let layout_rects = Self::compute_auto_layout(
+                    inner_rect.size(),
+                    w.props.layout_mode,
+                    w.props.layout_gap,
+                    w.props.layout_cols,
+                    w.props.layout_align,
+                    w.props.layout_justify,
+                    w.props.layout_padding,
+                    &children_info,
+                );
+
+                for (cid, rel_rect) in layout_rects {
+                    let child_container_rect = Rect::from_min_size(
+                        inner_rect.min + rel_rect.min.to_vec2(),
+                        rel_rect.size(),
+                    );
+                    if let Some(cw) = widgets.iter_mut().find(|x| x.id == cid) {
+                        cw.size = rel_rect.size();
+                    }
+                    Self::draw_widget_tree(ui, child_container_rect, grid_size, selected, cid, widgets, triggered);
+                }
             }
         }
     }
@@ -2209,12 +2632,16 @@ impl RadBuilderApp {
                 }
             }
             if drag_delta != egui::Vec2::ZERO {
-                w.pos += drag_delta;
-                w.pos = snap_pos_with_grid(w.pos, grid);
-                let maxx = (canvas_rect.width() - w.size.x).max(0.0);
-                let maxy = (canvas_rect.height() - w.size.y).max(0.0);
-                w.pos.x = w.pos.x.clamp(0.0, maxx);
-                w.pos.y = w.pos.y.clamp(0.0, maxy);
+                // If the widget is positioned by an auto-layout parent, do not mutate its absolute pos
+                let is_auto_laid_out = w.parent.is_some() && (w.props.width_policy != SizePolicy::Fixed || w.props.height_policy != SizePolicy::Fixed);
+                if !is_auto_laid_out {
+                    w.pos += drag_delta;
+                    w.pos = snap_pos_with_grid(w.pos, grid);
+                    let maxx = (canvas_rect.width() - w.size.x).max(0.0);
+                    let maxy = (canvas_rect.height() - w.size.y).max(0.0);
+                    w.pos.x = w.pos.x.clamp(0.0, maxx);
+                    w.pos.y = w.pos.y.clamp(0.0, maxy);
+                }
             }
 
             // resize handle unchanged, plus clamp
@@ -5026,9 +5453,67 @@ impl RadBuilderApp {
                     let children = ctx.project.children_of(w.id);
                     if children.is_empty() {
                         out.push_str("                    /* group contents */\n");
-                    } else {
+                    } else if w.props.layout_mode == LayoutMode::Free {
                         for child in children {
                             emit_widget(ctx, child, out, "ui.min_rect().min");
+                        }
+                    } else {
+                        match w.props.layout_mode {
+                            LayoutMode::Free => unreachable!(),
+                            LayoutMode::Row => {
+                                let justify_str = match w.props.layout_justify {
+                                    Justify::Start => "egui::Align::Min",
+                                    Justify::Center => "egui::Align::Center",
+                                    Justify::End => "egui::Align::Max",
+                                    _ => "egui::Align::Min",
+                                };
+                                out.push_str(&format!("                    ui.with_layout(egui::Layout::left_to_right({justify_str}), |ui| {{\n"));
+                                for (i, child) in children.iter().enumerate() {
+                                    if i > 0 && w.props.layout_gap > 0.0 {
+                                        out.push_str(&format!("                        ui.add_space({:.1});\n", w.props.layout_gap));
+                                    }
+                                    emit_widget(ctx, child, out, "ui.min_rect().min");
+                                }
+                                out.push_str("                    });\n");
+                            }
+                            LayoutMode::Column => {
+                                out.push_str("                    ui.vertical(|ui| {\n");
+                                for (i, child) in children.iter().enumerate() {
+                                    if i > 0 && w.props.layout_gap > 0.0 {
+                                        out.push_str(&format!("                        ui.add_space({:.1});\n", w.props.layout_gap));
+                                    }
+                                    emit_widget(ctx, child, out, "ui.min_rect().min");
+                                }
+                                out.push_str("                    });\n");
+                            }
+                            LayoutMode::WrapRow => {
+                                out.push_str("                    ui.horizontal_wrapped(|ui| {\n");
+                                for (i, child) in children.iter().enumerate() {
+                                    if i > 0 && w.props.layout_gap > 0.0 {
+                                        out.push_str(&format!("                        ui.add_space({:.1});\n", w.props.layout_gap));
+                                    }
+                                    emit_widget(ctx, child, out, "ui.min_rect().min");
+                                }
+                                out.push_str("                    });\n");
+                            }
+                            LayoutMode::Grid => {
+                                out.push_str(&format!(
+                                    "                    egui::Grid::new(\"grid_{id}\").num_columns({cols}).spacing([{gap:.1}, {gap:.1}]).show(ui, |ui| {{\n",
+                                    id = w.id,
+                                    cols = w.props.layout_cols.max(1),
+                                    gap = w.props.layout_gap
+                                ));
+                                for (i, child) in children.iter().enumerate() {
+                                    emit_widget(ctx, child, out, "ui.min_rect().min");
+                                    if (i + 1) % w.props.layout_cols.max(1) == 0 {
+                                        out.push_str("                        ui.end_row();\n");
+                                    }
+                                }
+                                if children.len() % w.props.layout_cols.max(1) != 0 {
+                                    out.push_str("                        ui.end_row();\n");
+                                }
+                                out.push_str("                    });\n");
+                            }
                         }
                     }
                     out.push_str("                });\n            });\n    });\n");
@@ -5053,9 +5538,61 @@ impl RadBuilderApp {
                         } else {
                             out.push_str("                /* scroll area contents */\n");
                         }
-                    } else {
+                    } else if w.props.layout_mode == LayoutMode::Free {
                         for child in children {
                             emit_widget(ctx, child, out, "ui.min_rect().min");
+                        }
+                    } else {
+                        match w.props.layout_mode {
+                            LayoutMode::Free => unreachable!(),
+                            LayoutMode::Row => {
+                                out.push_str("                ui.horizontal(|ui| {\n");
+                                for (i, child) in children.iter().enumerate() {
+                                    if i > 0 && w.props.layout_gap > 0.0 {
+                                        out.push_str(&format!("                    ui.add_space({:.1});\n", w.props.layout_gap));
+                                    }
+                                    emit_widget(ctx, child, out, "ui.min_rect().min");
+                                }
+                                out.push_str("                });\n");
+                            }
+                            LayoutMode::Column => {
+                                out.push_str("                ui.vertical(|ui| {\n");
+                                for (i, child) in children.iter().enumerate() {
+                                    if i > 0 && w.props.layout_gap > 0.0 {
+                                        out.push_str(&format!("                    ui.add_space({:.1});\n", w.props.layout_gap));
+                                    }
+                                    emit_widget(ctx, child, out, "ui.min_rect().min");
+                                }
+                                out.push_str("                });\n");
+                            }
+                            LayoutMode::WrapRow => {
+                                out.push_str("                ui.horizontal_wrapped(|ui| {\n");
+                                for (i, child) in children.iter().enumerate() {
+                                    if i > 0 && w.props.layout_gap > 0.0 {
+                                        out.push_str(&format!("                    ui.add_space({:.1});\n", w.props.layout_gap));
+                                    }
+                                    emit_widget(ctx, child, out, "ui.min_rect().min");
+                                }
+                                out.push_str("                });\n");
+                            }
+                            LayoutMode::Grid => {
+                                out.push_str(&format!(
+                                    "                egui::Grid::new(\"grid_{id}\").num_columns({cols}).spacing([{gap:.1}, {gap:.1}]).show(ui, |ui| {{\n",
+                                    id = w.id,
+                                    cols = w.props.layout_cols.max(1),
+                                    gap = w.props.layout_gap
+                                ));
+                                for (i, child) in children.iter().enumerate() {
+                                    emit_widget(ctx, child, out, "ui.min_rect().min");
+                                    if (i + 1) % w.props.layout_cols.max(1) == 0 {
+                                        out.push_str("                    ui.end_row();\n");
+                                    }
+                                }
+                                if children.len() % w.props.layout_cols.max(1) != 0 {
+                                    out.push_str("                    ui.end_row();\n");
+                                }
+                                out.push_str("                });\n");
+                            }
                         }
                     }
                     out.push_str("            });\n    });\n");
