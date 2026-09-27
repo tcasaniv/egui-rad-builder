@@ -1259,6 +1259,60 @@ mod tests {
             "Column root layout must emit ui.vertical"
         );
     }
+
+    #[test]
+    fn test_canvas_zoom_spawn_coordinate_scaling() {
+        let mut app = super::RadBuilderApp::default();
+        app.grid_size = 1.0; // 1px snap for exact math
+
+        // Test at zoom = 0.5 (scaled down by half)
+        app.canvas_zoom = 0.5;
+        let origin = egui::pos2(100.0, 100.0);
+        let mouse_pos = egui::pos2(200.0, 300.0);
+        // (mouse - origin) = (100, 200). Divided by 0.5 zoom => logical (200, 400).
+        // default_size for Label is vec2(140, 24). Half size is vec2(70, 12).
+        // expected pos = (200 - 70, 400 - 12) = (130, 388).
+        app.spawn_widget(
+            crate::widget::WidgetKind::Label,
+            mouse_pos,
+            crate::widget::DockArea::Center,
+            origin,
+        );
+        let w = app.project.widgets.last().unwrap();
+        assert_eq!(w.pos.x, 130.0);
+        assert_eq!(w.pos.y, 388.0);
+
+        // Test at zoom = 2.0 (scaled up 2x)
+        app.canvas_zoom = 2.0;
+        let mouse_pos2 = egui::pos2(300.0, 500.0);
+        // (mouse - origin) = (200, 400). Divided by 2.0 zoom => logical (100, 200).
+        // expected pos = (100 - 70, 200 - 12) = (30, 188).
+        app.spawn_widget(
+            crate::widget::WidgetKind::Label,
+            mouse_pos2,
+            crate::widget::DockArea::Center,
+            origin,
+        );
+        let w2 = app.project.widgets.last().unwrap();
+        assert_eq!(w2.pos.x, 30.0);
+        assert_eq!(w2.pos.y, 188.0);
+    }
+
+    #[test]
+    fn test_canvas_auto_fit_calculation() {
+        let mut app = super::RadBuilderApp::default();
+        app.project.canvas_size = egui::vec2(1920.0, 1080.0);
+        app.canvas_auto_fit = true;
+
+        // In a laptop screen with 960 width available and 540 height available:
+        let avail_w = 984.0 - 24.0; // 960.0
+        let avail_h = 578.0 - 38.0; // 540.0
+        let fit_w = avail_w / app.project.canvas_size.x; // 960 / 1920 = 0.5
+        let fit_h = avail_h / app.project.canvas_size.y; // 540 / 1080 = 0.5
+        let calculated_zoom = fit_w.min(fit_h).clamp(0.1, 3.0);
+
+        assert!((calculated_zoom - 0.5).abs() < 0.001);
+    }
 }
 
 
@@ -1339,6 +1393,10 @@ pub struct RadBuilderApp {
     live_right: Option<Rect>,
     live_center: Option<Rect>,
     live_center_origin: Option<Pos2>,
+    /// Canvas viewport zoom factor (1.0 = 100%, 0.5 = 50%, etc.)
+    canvas_zoom: f32,
+    /// Automatically scale zoom to fit available CentralPanel space
+    canvas_auto_fit: bool,
     // Clipboard for copy/paste
     clipboard: Option<Widget>,
     /// Current project file path (for Save)
@@ -1394,6 +1452,8 @@ impl Default for RadBuilderApp {
             live_right: None,
             live_center: None,
             live_center_origin: None,
+            canvas_zoom: 1.0,
+            canvas_auto_fit: false,
             clipboard: None,
             current_file: None,
             status_message: "Ready".to_string(),
@@ -1720,7 +1780,12 @@ impl RadBuilderApp {
         let size = kind.default_size();
         let props = kind.default_props();
 
-        let vecpos = at_global - area_origin - size * 0.5; // local to area
+        let zoom = if matches!(area, DockArea::Center | DockArea::Free) {
+            self.canvas_zoom.clamp(0.1, 4.0)
+        } else {
+            1.0
+        };
+        let vecpos = (at_global - area_origin) / zoom - size * 0.5; // local to area
         let pos = self.snap_pos(pos2(vecpos.x, vecpos.y));
         let w = Widget {
             id,
@@ -2001,7 +2066,7 @@ impl RadBuilderApp {
                     let panel_rect = ui.clip_rect();
                     self.live_top = Some(panel_rect);
                     if self.show_grid {
-                        self.draw_grid(ui, panel_rect);
+                        self.draw_grid(ui, panel_rect, self.grid_size);
                     }
                     for wid in top_ids {
                         Self::draw_widget_tree(
@@ -2013,6 +2078,7 @@ impl RadBuilderApp {
                             &mut self.project.widgets,
                             &mut triggered_actions,
                             false,
+                            1.0,
                         );
                     }
                 });
@@ -2026,7 +2092,7 @@ impl RadBuilderApp {
                     let panel_rect = ui.clip_rect();
                     self.live_bottom = Some(panel_rect);
                     if self.show_grid {
-                        self.draw_grid(ui, panel_rect);
+                        self.draw_grid(ui, panel_rect, self.grid_size);
                     }
                     for wid in bottom_ids {
                         Self::draw_widget_tree(
@@ -2038,6 +2104,7 @@ impl RadBuilderApp {
                             &mut self.project.widgets,
                             &mut triggered_actions,
                             false,
+                            1.0,
                         );
                     }
                 });
@@ -2051,7 +2118,7 @@ impl RadBuilderApp {
                     let panel_rect = ui.clip_rect();
                     self.live_left = Some(panel_rect);
                     if self.show_grid {
-                        self.draw_grid(ui, panel_rect);
+                        self.draw_grid(ui, panel_rect, self.grid_size);
                     }
                     for wid in left_ids {
                         Self::draw_widget_tree(
@@ -2063,6 +2130,7 @@ impl RadBuilderApp {
                             &mut self.project.widgets,
                             &mut triggered_actions,
                             false,
+                            1.0,
                         );
                     }
                 });
@@ -2076,7 +2144,7 @@ impl RadBuilderApp {
                     let panel_rect = ui.clip_rect();
                     self.live_right = Some(panel_rect);
                     if self.show_grid {
-                        self.draw_grid(ui, panel_rect);
+                        self.draw_grid(ui, panel_rect, self.grid_size);
                     }
                     for wid in right_ids {
                         Self::draw_widget_tree(
@@ -2088,6 +2156,7 @@ impl RadBuilderApp {
                             &mut self.project.widgets,
                             &mut triggered_actions,
                             false,
+                            1.0,
                         );
                     }
                 });
@@ -2143,8 +2212,40 @@ impl RadBuilderApp {
         let inner_canvas_size = egui::vec2(viewport_size.x, scroll_h);
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Viewport info banner
+            // Ctrl + MouseWheel zoom and Ctrl+0 reset
+            let center_clip = ui.clip_rect();
+            if ui.rect_contains_pointer(center_clip) {
+                let (ctrl, scroll_delta) = ui.input(|i| {
+                    (
+                        i.modifiers.ctrl || i.modifiers.command,
+                        i.raw_scroll_delta.y,
+                    )
+                });
+                if ctrl && scroll_delta.abs() > 0.0 {
+                    self.canvas_auto_fit = false;
+                    let factor = if scroll_delta > 0.0 { 1.1 } else { 0.9 };
+                    self.canvas_zoom = (self.canvas_zoom * factor).clamp(0.1, 4.0);
+                }
+            }
+            if ui.input(|i| (i.modifiers.ctrl || i.modifiers.command) && i.key_pressed(egui::Key::Num0)) {
+                self.canvas_auto_fit = false;
+                self.canvas_zoom = 1.0;
+            }
+
+            // Viewport info banner & zoom controls
             let screen_name = self.project.screen_preset.display_name();
+
+            // Auto-fit calculation
+            if self.canvas_auto_fit {
+                let avail = ui.available_size();
+                let avail_w = (avail.x - 24.0).max(50.0);
+                let avail_h = (avail.y - 38.0).max(50.0);
+                let fit_w = avail_w / viewport_size.x;
+                let fit_h = avail_h / viewport_size.y;
+                self.canvas_zoom = fit_w.min(fit_h).clamp(0.1, 3.0);
+            }
+            let zoom = self.canvas_zoom.clamp(0.1, 4.0);
+
             ui.horizontal(|ui| {
                 ui.label(
                     egui::RichText::new(format!(
@@ -2160,23 +2261,64 @@ impl RadBuilderApp {
                         .weak()
                         .size(11.0),
                 );
+                ui.separator();
+
+                ui.label(egui::RichText::new("Zoom:").weak().size(11.0));
+                if ui.button("-").on_hover_text("Zoom out (Ctrl + Wheel down)").clicked() {
+                    self.canvas_auto_fit = false;
+                    self.canvas_zoom = (self.canvas_zoom - 0.1).max(0.1);
+                }
+
+                let pct = (zoom * 100.0).round() as i32;
+                let mut selected_preset = pct;
+                let zoom_label = format!("{}%", pct);
+                egui::ComboBox::from_id_salt("canvas_zoom_combo")
+                    .selected_text(zoom_label)
+                    .width(60.0)
+                    .show_ui(ui, |ui| {
+                        for &val in &[25, 50, 75, 100, 125, 150, 200, 300] {
+                            if ui.selectable_value(&mut selected_preset, val, format!("{}%", val)).clicked() {
+                                self.canvas_auto_fit = false;
+                                self.canvas_zoom = val as f32 / 100.0;
+                            }
+                        }
+                    });
+
+                if ui.button("+").on_hover_text("Zoom in (Ctrl + Wheel up)").clicked() {
+                    self.canvas_auto_fit = false;
+                    self.canvas_zoom = (self.canvas_zoom + 0.1).min(4.0);
+                }
+
+                if ui.button("100%").on_hover_text("Reset zoom to 100% (Ctrl+0)").clicked() {
+                    self.canvas_auto_fit = false;
+                    self.canvas_zoom = 1.0;
+                }
+
+                let fit_btn = ui.selectable_label(self.canvas_auto_fit, "Fit")
+                    .on_hover_text("Fit screen to available window space");
+                if fit_btn.clicked() {
+                    self.canvas_auto_fit = !self.canvas_auto_fit;
+                }
             });
             ui.add_space(2.0);
 
             // Container frame for device screen
+            let scaled_viewport_size = viewport_size * zoom;
+            let scaled_inner_size = inner_canvas_size * zoom;
+
             egui::Frame::NONE
                 .stroke(Stroke::new(1.0_f32, Color32::from_gray(65)))
                 .corner_radius(4.0)
                 .fill(ui.visuals().panel_fill)
                 .show(ui, |ui| {
-                    egui::ScrollArea::vertical()
+                    egui::ScrollArea::both()
                         .id_salt("device_screen_scroll")
-                        .max_width(viewport_size.x)
-                        .max_height(viewport_size.y)
+                        .max_width(scaled_viewport_size.x)
+                        .max_height(scaled_viewport_size.y)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            let (resp, painter) = ui.allocate_painter(inner_canvas_size, egui::Sense::click());
-                            let painter_rect = Rect::from_min_size(resp.rect.min, inner_canvas_size);
+                            let (resp, painter) = ui.allocate_painter(scaled_inner_size, egui::Sense::click());
+                            let painter_rect = Rect::from_min_size(resp.rect.min, scaled_inner_size);
                             self.live_center = Some(ui.clip_rect());
                             self.live_center_origin = Some(painter_rect.min);
 
@@ -2184,7 +2326,7 @@ impl RadBuilderApp {
                             painter.rect_filled(painter_rect, 0.0, ui.visuals().window_fill());
 
                             if self.show_grid {
-                                self.draw_grid(ui, painter_rect);
+                                self.draw_grid(ui, painter_rect, self.grid_size * zoom);
                             }
 
                             for wid in &root_ids {
@@ -2197,6 +2339,7 @@ impl RadBuilderApp {
                                     &mut self.project.widgets,
                                     &mut triggered_actions,
                                     effective_root_mode != LayoutMode::Free,
+                                    zoom,
                                 );
                             }
 
@@ -2209,8 +2352,8 @@ impl RadBuilderApp {
             // --- Drag ghost + drop ---
             if let Some(kind) = self.spawning {
                 if let Some(mouse) = ui.ctx().pointer_interact_pos() {
-                    // Use centralized default_size from WidgetKind
-                    let ghost_size = kind.default_size();
+                    // Use centralized default_size from WidgetKind scaled by zoom
+                    let ghost_size = kind.default_size() * zoom;
                     let ghost = egui::Rect::from_center_size(mouse, ghost_size);
                     let layer = egui::LayerId::new(egui::Order::Tooltip, Id::new("ghost"));
                     let painter = ui.ctx().layer_painter(layer);
@@ -2258,9 +2401,9 @@ impl RadBuilderApp {
         }
     }
 
-    fn draw_grid(&self, ui: &mut egui::Ui, rect: Rect) {
+    fn draw_grid(&self, ui: &mut egui::Ui, rect: Rect, grid_step: f32) {
         let painter = ui.painter_at(rect);
-        let g = self.grid_size;
+        let g = grid_step.max(4.0);
         let cols = (rect.width() / g) as i32;
         let rows = (rect.height() / g) as i32;
         for c in 0..=cols {
@@ -2641,6 +2784,7 @@ impl RadBuilderApp {
         widgets: &mut [Widget],
         triggered: &mut Vec<ActionEffect>,
         is_in_auto_layout: bool,
+        zoom: f32,
     ) {
         let idx = match widgets.iter().position(|w| w.id == widget_id) {
             Some(i) => i,
@@ -2657,7 +2801,8 @@ impl RadBuilderApp {
         }
 
         // ── Responsive visibility check ──────────────────────────────────────
-        if !widgets[idx].props.responsive_vis.is_visible(container_rect.size()) {
+        let logical_container_size = container_rect.size() / zoom;
+        if !widgets[idx].props.responsive_vis.is_visible(logical_container_size) {
             return;
         }
 
@@ -2686,6 +2831,7 @@ impl RadBuilderApp {
                     has_children,
                     triggered,
                     is_in_auto_layout,
+                    zoom,
                 );
             });
         } else {
@@ -2698,6 +2844,7 @@ impl RadBuilderApp {
                 has_children,
                 triggered,
                 is_in_auto_layout,
+                zoom,
             );
         }
 
@@ -2746,11 +2893,11 @@ impl RadBuilderApp {
                 return;
             }
 
-            let widget_rect = Rect::from_min_size(container_rect.min + w.pos.to_vec2(), w.size);
-            let offset = Self::container_content_offset(w.kind, &w.props.text);
+            let widget_rect = Rect::from_min_size(container_rect.min + (w.pos * zoom).to_vec2(), w.size * zoom);
+            let offset = Self::container_content_offset(w.kind, &w.props.text) * zoom;
             let inner_rect = Rect::from_min_size(
                 widget_rect.min + offset,
-                (widget_rect.size() - offset - vec2(6.0, 6.0)).max(vec2(10.0, 10.0)),
+                (widget_rect.size() - offset - vec2(6.0 * zoom, 6.0 * zoom)).max(vec2(10.0 * zoom, 10.0 * zoom)),
             );
 
             // Filter children: active, matching parent, and matching TabBar tab if applicable
@@ -2776,11 +2923,11 @@ impl RadBuilderApp {
                 .collect();
             children.sort_by_key(|&(_, z)| z);
 
-            let effective_layout_mode = w.props.responsive_layout.resolve_mode(w.props.layout_mode, container_rect.size());
+            let effective_layout_mode = w.props.responsive_layout.resolve_mode(w.props.layout_mode, logical_container_size);
 
             if effective_layout_mode == LayoutMode::Free {
                 for (cid, _) in &children {
-                    Self::draw_widget_tree(ui, inner_rect, grid_size, selected, *cid, widgets, triggered, false);
+                    Self::draw_widget_tree(ui, inner_rect, grid_size, selected, *cid, widgets, triggered, false, zoom);
                 }
 
                 // Auto-sizing height in Free mode
@@ -2789,7 +2936,7 @@ impl RadBuilderApp {
                         .iter()
                         .filter_map(|&(cid, _)| widgets.iter().find(|x| x.id == cid).map(|cw| cw.pos.y + cw.size.y))
                         .fold(0.0_f32, f32::max);
-                    let required_h = max_bottom + offset.y + 6.0;
+                    let required_h = max_bottom + (offset.y / zoom) + 6.0;
                     if required_h > 24.0 && (widgets[idx].size.y - required_h).abs() > 0.5 {
                         widgets[idx].size.y = required_h;
                         widgets[idx].props.expanded_height = Some(required_h);
@@ -2806,7 +2953,7 @@ impl RadBuilderApp {
                     .collect();
 
                 let layout_rects = Self::compute_auto_layout(
-                    inner_rect.size(),
+                    inner_rect.size() / zoom,
                     effective_layout_mode,
                     w.props.layout_gap,
                     w.props.layout_cols,
@@ -2820,7 +2967,7 @@ impl RadBuilderApp {
                 // Auto-sizing height in auto-layout mode
                 if widgets[idx].props.auto_size_y && !layout_rects.is_empty() {
                     let max_bottom = layout_rects.iter().map(|(_, r)| r.max.y).fold(0.0_f32, f32::max);
-                    let required_h = max_bottom + offset.y + w.props.layout_padding[2] + 6.0;
+                    let required_h = max_bottom + (offset.y / zoom) + w.props.layout_padding[2] + 6.0;
                     if required_h > 24.0 && (widgets[idx].size.y - required_h).abs() > 0.5 {
                         widgets[idx].size.y = required_h;
                         widgets[idx].props.expanded_height = Some(required_h);
@@ -2829,14 +2976,14 @@ impl RadBuilderApp {
 
                 for (cid, rel_rect) in layout_rects {
                     let child_container_rect = Rect::from_min_size(
-                        inner_rect.min + rel_rect.min.to_vec2(),
-                        rel_rect.size(),
+                        inner_rect.min + (rel_rect.min * zoom).to_vec2(),
+                        rel_rect.size() * zoom,
                     );
                     if let Some(cw) = widgets.iter_mut().find(|x| x.id == cid) {
                         cw.pos = egui::Pos2::ZERO;
                         cw.size = rel_rect.size().max(egui::Vec2::splat(1.0));
                     }
-                    Self::draw_widget_tree(ui, child_container_rect, grid_size, selected, cid, widgets, triggered, true);
+                    Self::draw_widget_tree(ui, child_container_rect, grid_size, selected, cid, widgets, triggered, true, zoom);
                 }
             }
         }
@@ -2851,14 +2998,23 @@ impl RadBuilderApp {
         has_children: bool,
         triggered: &mut Vec<ActionEffect>,
         is_in_auto_layout: bool,
+        zoom: f32,
     ) {
         let is_edit_mode = ui
             .ctx()
             .data(|d| d.get_temp::<bool>(Id::new("edit_mode")))
             .unwrap_or(true);
-        let rect = Rect::from_min_size(canvas_rect.min + w.pos.to_vec2(), w.size);
+        let scaled_size = w.size * zoom;
+        let rect = Rect::from_min_size(canvas_rect.min + (w.pos * zoom).to_vec2(), scaled_size);
         ui.push_id(("widget", w.id), |ui| {
             ui.scope_builder(UiBuilder::new().max_rect(rect), |ui| {
+                if (zoom - 1.0).abs() > 0.01 {
+                    for (_, font_id) in ui.style_mut().text_styles.iter_mut() {
+                        font_id.size = (font_id.size * zoom).max(6.0);
+                    }
+                    ui.spacing_mut().item_spacing *= zoom;
+                    ui.spacing_mut().button_padding *= zoom;
+                }
                 match w.kind {
                     WidgetKind::MenuButton => {
                         let items = if w.props.items.is_empty() {
@@ -2885,7 +3041,7 @@ impl RadBuilderApp {
                         });
                     }
                     WidgetKind::Button => {
-                        let resp = ui.add_sized(w.size, egui::Button::new(&w.props.text));
+                        let resp = ui.add_sized(scaled_size, egui::Button::new(&w.props.text));
                         if !is_edit_mode {
                             Self::check_widget_actions(&resp, &w.props.actions, triggered);
                         }
@@ -2894,14 +3050,14 @@ impl RadBuilderApp {
                         // We keep it simple: icon + text as the button label.
                         // Users can change `icon` to any emoji / short string.
                         let label = format!("{}  {}", w.props.icon, w.props.text);
-                        let resp = ui.add_sized(w.size, egui::Button::new(label));
+                        let resp = ui.add_sized(scaled_size, egui::Button::new(label));
                         if !is_edit_mode {
                             Self::check_widget_actions(&resp, &w.props.actions, triggered);
                         }
                     }
                     WidgetKind::Checkbox => {
                         let mut checked = w.props.checked;
-                        let resp = ui.add_sized(w.size, egui::Checkbox::new(&mut checked, &w.props.text));
+                        let resp = ui.add_sized(scaled_size, egui::Checkbox::new(&mut checked, &w.props.text));
                         w.props.checked = checked;
                         if !is_edit_mode {
                             Self::check_widget_actions(&resp, &w.props.actions, triggered);
@@ -2912,7 +3068,7 @@ impl RadBuilderApp {
                         let resp = egui::TextEdit::singleline(&mut buf)
                             .id_salt(("text_edit", w.id))
                             .hint_text("text");
-                        let r = ui.add_sized(w.size, resp);
+                        let r = ui.add_sized(scaled_size, resp);
                         w.props.text = buf;
                         if !is_edit_mode {
                             Self::check_widget_actions(&r, &w.props.actions, triggered);
@@ -2922,7 +3078,7 @@ impl RadBuilderApp {
                         let mut v = w.props.value;
                         let slider = egui::Slider::new(&mut v, w.props.min..=w.props.max)
                             .text(&w.props.text);
-                        let resp = ui.add_sized(w.size, slider);
+                        let resp = ui.add_sized(scaled_size, slider);
                         w.props.value = v;
                         if !is_edit_mode {
                             Self::check_widget_actions(&resp, &w.props.actions, triggered);
@@ -2931,7 +3087,7 @@ impl RadBuilderApp {
                     WidgetKind::ProgressBar => {
                         let bar =
                             egui::ProgressBar::new(w.props.value.clamp(0.0, 1.0)).show_percentage();
-                        ui.add_sized(w.size, bar);
+                        ui.add_sized(scaled_size, bar);
                     }
                     WidgetKind::RadioGroup => {
                         let mut sel = w.props.selected.min(w.props.items.len().saturating_sub(1));
@@ -2975,7 +3131,7 @@ impl RadBuilderApp {
                         };
                         let mut sel = w.props.selected.min(items.len() - 1);
                         egui::ComboBox::from_id_salt(w.id)
-                            .width(w.size.x)
+                            .width(scaled_size.x)
                             .selected_text(items[sel].clone())
                             .show_ui(ui, |ui| {
                                 for (i, it) in items.iter().enumerate() {
@@ -3023,7 +3179,7 @@ impl RadBuilderApp {
                         let slider = egui::Slider::new(&mut v, w.props.min..=w.props.max)
                             .suffix("°")
                             .text(&w.props.text);
-                        ui.add_sized(w.size, slider);
+                        ui.add_sized(scaled_size, slider);
                         w.props.value = v;
                     }
                     WidgetKind::Password => {
@@ -3032,7 +3188,7 @@ impl RadBuilderApp {
                             .id_salt(("password_edit", w.id))
                             .password(true)
                             .hint_text("password");
-                        ui.add_sized(w.size, resp);
+                        ui.add_sized(scaled_size, resp);
                         w.props.text = buf;
                     }
                     WidgetKind::Tree => {
@@ -3048,10 +3204,10 @@ impl RadBuilderApp {
                             let mut items: Vec<(usize, String)> = lines
                                 .iter()
                                 .map(|s| {
-                                    let indent = s.chars().take_while(|c| *c == ' ').count() / 2;
-                                    (indent, s.trim().to_string())
-                                })
-                                .collect();
+                                     let indent = s.chars().take_while(|c| *c == ' ').count() / 2;
+                                     (indent, s.trim().to_string())
+                                 })
+                                 .collect();
                             // Remove empties
                             items.retain(|(_, s)| !s.is_empty());
 
@@ -3119,9 +3275,9 @@ impl RadBuilderApp {
                         let mut buf = w.props.text.clone();
                         let resp = egui::TextEdit::multiline(&mut buf)
                             .id_salt(("text_area", w.id))
-                            .desired_width(w.size.x)
+                            .desired_width(scaled_size.x)
                             .desired_rows(5);
-                        ui.add_sized(w.size, resp);
+                        ui.add_sized(scaled_size, resp);
                         w.props.text = buf;
                     }
                     WidgetKind::DragValue => {
@@ -3162,7 +3318,7 @@ impl RadBuilderApp {
                                     egui::TextEdit::multiline(&mut buf)
                                         .id_salt(("code_editor", w.id))
                                         .code_editor()
-                                        .desired_width(w.size.x)
+                                        .desired_width(scaled_size.x)
                                         .desired_rows(8),
                                 );
                             });
@@ -3184,7 +3340,7 @@ impl RadBuilderApp {
                             .fill(color)
                             .stroke(Stroke::new(1.0_f32, Color32::GRAY))
                             .show(ui, |ui| {
-                                ui.set_min_size(w.size);
+                                ui.set_min_size(scaled_size);
                                 ui.centered_and_justified(|ui| {
                                     ui.label(format!(
                                         "🖼 {}\n{}x{}",
@@ -3205,7 +3361,7 @@ impl RadBuilderApp {
                             .stroke(Stroke::new(1.0_f32, Color32::GRAY))
                             .corner_radius(4.0)
                             .show(ui, |ui| {
-                                ui.set_min_size(w.size);
+                                ui.set_min_size(scaled_size);
                                 ui.centered_and_justified(|ui| {
                                     ui.label(&w.props.text);
                                 });
@@ -3213,7 +3369,7 @@ impl RadBuilderApp {
                     }
                     WidgetKind::Group => {
                         egui::Frame::group(ui.style()).show(ui, |ui| {
-                            ui.set_min_size((w.size - vec2(12.0, 12.0)).max(egui::Vec2::ZERO));
+                            ui.set_min_size((scaled_size - vec2(12.0 * zoom, 12.0 * zoom)).max(egui::Vec2::ZERO));
                             let add_contents = |ui: &mut egui::Ui| {
                                 if !w.props.text.is_empty() {
                                     ui.strong(&w.props.text);
@@ -3237,8 +3393,8 @@ impl RadBuilderApp {
                             .show(ui, |ui| {
                                 egui::ScrollArea::both()
                                     .id_salt(("scroll_box", w.id))
-                                    .max_width((w.size.x - 4.0).max(0.0))
-                                    .max_height((w.size.y - 4.0).max(0.0))
+                                    .max_width((scaled_size.x - 4.0 * zoom).max(0.0))
+                                    .max_height((scaled_size.y - 4.0 * zoom).max(0.0))
                                     .auto_shrink([false, false])
                                     .show(ui, |ui| {
                                         if !w.props.text.is_empty() {
@@ -3281,7 +3437,7 @@ impl RadBuilderApp {
                     }
                     WidgetKind::Window => {
                         egui::Frame::window(ui.style()).show(ui, |ui| {
-                            ui.set_min_size((w.size - vec2(16.0, 16.0)).max(egui::Vec2::ZERO));
+                            ui.set_min_size((scaled_size - vec2(16.0 * zoom, 16.0 * zoom)).max(egui::Vec2::ZERO));
                             ui.vertical(|ui| {
                                 ui.horizontal(|ui| {
                                     ui.strong(&w.props.text);
@@ -3322,29 +3478,29 @@ impl RadBuilderApp {
         let painter = ui.painter();
         let is_selected = selected.contains(&w.id);
         let stroke = if is_selected {
-            Stroke::new(2.0_f32, Color32::LIGHT_BLUE)
+            Stroke::new((2.0 * zoom).max(1.5), Color32::LIGHT_BLUE)
         } else if !w.props.initially_visible {
-            Stroke::new(1.0_f32, Color32::from_rgba_unmultiplied(120, 160, 255, 160))
+            Stroke::new((1.0 * zoom).max(1.0), Color32::from_rgba_unmultiplied(120, 160, 255, 160))
         } else {
-            Stroke::new(1.0_f32, Color32::from_gray(90))
+            Stroke::new((1.0 * zoom).max(1.0), Color32::from_gray(90))
         };
         painter.rect_stroke(
             rect,
-            CornerRadius::same(6),
+            CornerRadius::same(((6.0 * zoom).max(2.0).round()) as u8),
             stroke,
             egui::StrokeKind::Outside,
         );
         if !w.props.initially_visible && is_edit_mode {
             painter.text(
-                rect.right_top() + vec2(-4.0, 4.0),
+                rect.right_top() + vec2(-4.0 * zoom, 4.0 * zoom),
                 egui::Align2::RIGHT_TOP,
                 "hidden",
-                egui::FontId::proportional(10.0),
+                egui::FontId::proportional((10.0 * zoom).max(8.0)),
                 Color32::from_rgba_unmultiplied(120, 160, 255, 200),
             );
         }
         if is_edit_mode {
-            let pad = 6.0;
+            let pad = (6.0 * zoom).max(4.0);
             let expanded = rect.expand(pad);
             let top = Rect::from_min_max(expanded.min, pos2(expanded.max.x, rect.min.y));
             let bottom = Rect::from_min_max(pos2(expanded.min.x, rect.max.y), expanded.max);
@@ -3389,29 +3545,32 @@ impl RadBuilderApp {
                 }
             }
             if drag_delta != egui::Vec2::ZERO && !is_in_auto_layout {
-                w.pos += drag_delta;
+                let scaled_delta = drag_delta / zoom;
+                w.pos += scaled_delta;
                 w.pos = snap_pos_with_grid(w.pos, grid);
-                let maxx = (canvas_rect.width() - w.size.x).max(0.0);
-                let maxy = (canvas_rect.height() - w.size.y).max(0.0);
+                let logical_canvas_w = canvas_rect.width() / zoom;
+                let logical_canvas_h = canvas_rect.height() / zoom;
+                let maxx = (logical_canvas_w - w.size.x).max(0.0);
+                let maxy = (logical_canvas_h - w.size.y).max(0.0);
                 w.pos.x = w.pos.x.clamp(0.0, maxx);
                 w.pos.y = w.pos.y.clamp(0.0, maxy);
             }
 
-            // resize handle unchanged, plus clamp
-            let handle = {
-                let hs = 12.0;
-                Rect::from_min_size(expanded.max - vec2(hs, hs), vec2(hs, hs))
-            };
+            // resize handle scaled by zoom, plus clamp
+            let hs = (12.0 * zoom).clamp(8.0, 24.0);
+            let handle = Rect::from_min_size(expanded.max - vec2(hs, hs), vec2(hs, hs));
             let rid = ui.make_persistent_id(("resize", w.id));
             let rresp = ui.interact(handle, rid, Sense::click_and_drag());
             if rresp.hovered() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe);
             }
             if rresp.dragged() {
-                let delta = rresp.drag_delta();
+                let delta = rresp.drag_delta() / zoom;
                 w.size += delta;
-                w.size.x = w.size.x.max(20.0).min(canvas_rect.width());
-                w.size.y = w.size.y.max(16.0).min(canvas_rect.height());
+                let logical_canvas_w = canvas_rect.width() / zoom;
+                let logical_canvas_h = canvas_rect.height() / zoom;
+                w.size.x = w.size.x.max(20.0).min(logical_canvas_w);
+                w.size.y = w.size.y.max(16.0).min(logical_canvas_h);
             }
             ui.painter()
                 .rect_filled(handle, 2.0, Color32::from_rgb(100, 160, 255));
@@ -3948,6 +4107,25 @@ impl RadBuilderApp {
                     self.project.canvas_size.x = self.project.canvas_size.y;
                     self.project.canvas_size.y = temp;
                     self.project.screen_preset = ScreenPreset::Custom;
+                }
+            });
+
+            ui.separator();
+            ui.label(egui::RichText::new("Canvas Zoom & Viewport").strong());
+            ui.horizontal(|ui| {
+                ui.label("Zoom:");
+                let mut pct = (self.canvas_zoom * 100.0).round() as i32;
+                if ui.add(egui::DragValue::new(&mut pct).range(10..=400).suffix("%")).changed() {
+                    self.canvas_auto_fit = false;
+                    self.canvas_zoom = pct as f32 / 100.0;
+                }
+                if ui.button("100%").clicked() {
+                    self.canvas_auto_fit = false;
+                    self.canvas_zoom = 1.0;
+                }
+                let fit_btn = ui.selectable_label(self.canvas_auto_fit, "Fit to Screen");
+                if fit_btn.clicked() {
+                    self.canvas_auto_fit = !self.canvas_auto_fit;
                 }
             });
 
