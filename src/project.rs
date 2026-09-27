@@ -1,4 +1,4 @@
-use crate::widget::Widget;
+use crate::widget::{Align, Justify, LayoutMode, ResponsiveLayout, Widget};
 use egui::{Vec2, vec2};
 use serde::{Deserialize, Serialize};
 
@@ -18,12 +18,12 @@ pub(crate) enum ScreenPreset {
 impl ScreenPreset {
     pub(crate) const fn display_name(self) -> &'static str {
         match self {
-            Self::Desktop         => "💻 Desktop (1280x800)",
-            Self::MobilePortrait  => "📱 Mobile Portrait (390x844)",
-            Self::MobileLandscape => "📱 Mobile Landscape (844x390)",
-            Self::TabletPortrait  => "📱 Tablet Portrait (768x1024)",
-            Self::TabletLandscape => "📱 Tablet Landscape (1024x768)",
-            Self::Custom          => "⚙ Custom",
+            Self::Desktop         => "Desktop (1280x800)",
+            Self::MobilePortrait  => "Mobile Portrait (390x844)",
+            Self::MobileLandscape => "Mobile Landscape (844x390)",
+            Self::TabletPortrait  => "Tablet Portrait (768x1024)",
+            Self::TabletLandscape => "Tablet Landscape (1024x768)",
+            Self::Custom          => "Custom",
         }
     }
 
@@ -51,6 +51,14 @@ impl ScreenPreset {
     }
 }
 
+fn default_root_layout_gap() -> f32 {
+    16.0
+}
+
+fn default_root_layout_cols() -> usize {
+    2
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct Project {
     pub(crate) widgets: Vec<Widget>,
@@ -61,6 +69,29 @@ pub(crate) struct Project {
     pub(crate) panel_right_enabled: bool,
     #[serde(default)]
     pub(crate) screen_preset: ScreenPreset,
+
+    // ── Root Screen Container Layout (HTML/CSS Flex & Grid Flow) ───────────
+    /// Layout mode for the root canvas viewport. CSS: `display: flex / grid / block`.
+    #[serde(default)]
+    pub(crate) root_layout_mode: LayoutMode,
+    /// Spacing between root widgets in auto-layout modes (px). CSS: `gap`.
+    #[serde(default = "default_root_layout_gap")]
+    pub(crate) root_layout_gap: f32,
+    /// Number of columns when `root_layout_mode == LayoutMode::Grid`.
+    #[serde(default = "default_root_layout_cols")]
+    pub(crate) root_layout_cols: usize,
+    /// Cross-axis alignment for root widgets. CSS: `align-items`.
+    #[serde(default)]
+    pub(crate) root_layout_align: Align,
+    /// Main-axis distribution for root widgets. CSS: `justify-content`.
+    #[serde(default)]
+    pub(crate) root_layout_justify: Justify,
+    /// Screen inner padding [top, right, bottom, left] in px. CSS: `padding`.
+    #[serde(default)]
+    pub(crate) root_layout_padding: [f32; 4],
+    /// Media-query style responsive layout adaptation rule for root canvas.
+    #[serde(default)]
+    pub(crate) root_responsive_layout: ResponsiveLayout,
 }
 
 impl Project {
@@ -119,7 +150,43 @@ impl Default for Project {
             panel_left_enabled: false,
             panel_right_enabled: false,
             screen_preset: ScreenPreset::Desktop,
+            root_layout_mode: LayoutMode::Free,
+            root_layout_gap: 16.0,
+            root_layout_cols: 2,
+            root_layout_align: Align::Start,
+            root_layout_justify: Justify::Start,
+            root_layout_padding: [16.0, 16.0, 16.0, 16.0],
+            root_responsive_layout: ResponsiveLayout::None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_project_root_layout_defaults_and_serde() {
+        let proj = Project::default();
+        assert_eq!(proj.root_layout_mode, LayoutMode::Free);
+        assert_eq!(proj.root_layout_gap, 16.0);
+        assert_eq!(proj.root_layout_cols, 2);
+        assert_eq!(proj.root_layout_padding, [16.0, 16.0, 16.0, 16.0]);
+
+        // Verify JSON backward compat without root layout fields
+        let legacy_json = r#"{
+            "widgets": [],
+            "canvas_size": [800.0, 600.0],
+            "panel_top_enabled": false,
+            "panel_bottom_enabled": false,
+            "panel_left_enabled": false,
+            "panel_right_enabled": false
+        }"#;
+
+        let parsed: Project = serde_json::from_str(legacy_json).expect("should parse legacy project JSON");
+        assert_eq!(parsed.root_layout_mode, LayoutMode::Free);
+        assert_eq!(parsed.root_layout_gap, 16.0);
+        assert_eq!(parsed.root_layout_cols, 2);
     }
 }
 

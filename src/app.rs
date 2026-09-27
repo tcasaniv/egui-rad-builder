@@ -1191,6 +1191,74 @@ mod tests {
         app.paste();
         assert!(app.status_message.starts_with("Pasted widget #"));
     }
+
+    #[test]
+    fn test_root_auto_layout_column_fills_screen_width() {
+        let mut app = super::RadBuilderApp::default();
+        app.project.canvas_size = egui::vec2(390.0, 844.0);
+        app.project.root_layout_mode = crate::widget::LayoutMode::Column;
+        app.project.root_layout_padding = [10.0, 10.0, 10.0, 10.0];
+        app.project.root_layout_gap = 8.0;
+
+        let mut w1 = make_widget(1, 1, None);
+        w1.size = egui::vec2(100.0, 50.0);
+        w1.props.width_policy = crate::widget::SizePolicy::Fill;
+
+        let mut w2 = make_widget(2, 2, None);
+        w2.size = egui::vec2(100.0, 30.0);
+        w2.props.width_policy = crate::widget::SizePolicy::Percent(50.0);
+
+        let children_info = vec![
+            (w1.id, w1.size, w1.props.width_policy, w1.props.height_policy, w1.props.align_self),
+            (w2.id, w2.size, w2.props.width_policy, w2.props.height_policy, w2.props.align_self),
+        ];
+
+        let rects = super::RadBuilderApp::compute_auto_layout(
+            app.project.canvas_size,
+            app.project.root_layout_mode,
+            app.project.root_layout_gap,
+            app.project.root_layout_cols,
+            app.project.root_layout_align,
+            app.project.root_layout_justify,
+            app.project.root_layout_padding,
+            &children_info,
+            true,
+        );
+
+        assert_eq!(rects.len(), 2);
+        // Available width = 390 - 10 - 10 = 370
+        let r1 = rects[0].1;
+        assert!((r1.width() - 370.0).abs() < 0.1, "Widget 1 should fill full width minus padding");
+        assert_eq!(r1.min.x, 10.0);
+        assert_eq!(r1.min.y, 10.0);
+
+        let r2 = rects[1].1;
+        assert!((r2.width() - 185.0).abs() < 0.1, "Widget 2 should take 50% of available width");
+        assert_eq!(r2.min.x, 10.0);
+        // r2.min.y should be 10 (pad_top) + 50 (w1 height) + 8 (gap) = 68.0
+        assert_eq!(r2.min.y, 68.0);
+    }
+
+    #[test]
+    fn test_codegen_root_layout_and_scroll_area() {
+        let mut app = super::RadBuilderApp::default();
+        app.project.canvas_size = egui::vec2(400.0, 700.0);
+        app.project.root_layout_mode = crate::widget::LayoutMode::Column;
+        app.project.root_layout_gap = 12.0;
+
+        let w = make_widget(10, 1, None);
+        app.project.widgets.push(w);
+
+        let code = app.generate_single_file();
+        assert!(
+            code.contains("egui::ScrollArea::vertical().auto_shrink([false, false])"),
+            "Generated CentralPanel must include vertical ScrollArea"
+        );
+        assert!(
+            code.contains("ui.vertical(|ui| {"),
+            "Column root layout must emit ui.vertical"
+        );
+    }
 }
 
 
@@ -1270,6 +1338,7 @@ pub struct RadBuilderApp {
     live_left: Option<Rect>,
     live_right: Option<Rect>,
     live_center: Option<Rect>,
+    live_center_origin: Option<Pos2>,
     // Clipboard for copy/paste
     clipboard: Option<Widget>,
     /// Current project file path (for Save)
@@ -1324,6 +1393,7 @@ impl Default for RadBuilderApp {
             live_left: None,
             live_right: None,
             live_center: None,
+            live_center_origin: None,
             clipboard: None,
             current_file: None,
             status_message: "Ready".to_string(),
@@ -1629,8 +1699,9 @@ impl RadBuilderApp {
             DockArea::Bottom => self.live_bottom.map(|r| r.min),
             DockArea::Left => self.live_left.map(|r| r.min),
             DockArea::Right => self.live_right.map(|r| r.min),
-            DockArea::Center => self.live_center.map(|r| r.min),
-            DockArea::Free => self.live_center.map(|r| r.min), // place Free inside center canvas
+            DockArea::Center | DockArea::Free => {
+                self.live_center_origin.or_else(|| self.live_center.map(|r| r.min))
+            }
         }
     }
 
@@ -1897,6 +1968,7 @@ impl RadBuilderApp {
         self.live_left = None;
         self.live_right = None;
         self.live_center = None;
+        self.live_center_origin = None;
 
         // -------- 1) Bucket root widget IDs by area --------
         let mut top_ids = Vec::new();
@@ -1940,6 +2012,7 @@ impl RadBuilderApp {
                             wid,
                             &mut self.project.widgets,
                             &mut triggered_actions,
+                            false,
                         );
                     }
                 });
@@ -1964,6 +2037,7 @@ impl RadBuilderApp {
                             wid,
                             &mut self.project.widgets,
                             &mut triggered_actions,
+                            false,
                         );
                     }
                 });
@@ -1988,6 +2062,7 @@ impl RadBuilderApp {
                             wid,
                             &mut self.project.widgets,
                             &mut triggered_actions,
+                            false,
                         );
                     }
                 });
@@ -2012,47 +2087,124 @@ impl RadBuilderApp {
                             wid,
                             &mut self.project.widgets,
                             &mut triggered_actions,
+                            false,
                         );
                     }
                 });
         }
 
-        // Center (design canvas)
+        // Center (design canvas / device screen viewport)
+        let viewport_size = self.project.canvas_size;
+        let effective_root_mode = self
+            .project
+            .root_responsive_layout
+            .resolve_mode(self.project.root_layout_mode, viewport_size);
+
+        let mut root_ids = center_ids;
+        root_ids.extend(free_ids);
+
+        if effective_root_mode != LayoutMode::Free {
+            let children_info: Vec<(WidgetId, egui::Vec2, SizePolicy, SizePolicy, Option<Align>)> = root_ids
+                .iter()
+                .filter_map(|&cid| {
+                    self.project.widgets.iter().find(|x| x.id == cid && x.props.active).map(|cw| {
+                        (cw.id, cw.size, cw.props.width_policy, cw.props.height_policy, cw.props.align_self)
+                    })
+                })
+                .collect();
+
+            let layout_rects = Self::compute_auto_layout(
+                viewport_size,
+                effective_root_mode,
+                self.project.root_layout_gap,
+                self.project.root_layout_cols,
+                self.project.root_layout_align,
+                self.project.root_layout_justify,
+                self.project.root_layout_padding,
+                &children_info,
+                true, // hug_height: true so column flows naturally downwards
+            );
+
+            for (cid, rel_rect) in layout_rects {
+                if let Some(cw) = self.project.widgets.iter_mut().find(|x| x.id == cid) {
+                    cw.pos = rel_rect.min;
+                    cw.size = rel_rect.size().max(egui::Vec2::splat(1.0));
+                }
+            }
+        }
+
+        // Inner scrollable content height (allows scrolling to any content taller than viewport)
+        let total_content_h = root_ids
+            .iter()
+            .filter_map(|&wid| self.project.widgets.iter().find(|x| x.id == wid && x.props.active))
+            .map(|w| w.pos.y + w.size.y + if effective_root_mode != LayoutMode::Free { self.project.root_layout_padding[2] } else { 0.0 })
+            .fold(0.0_f32, f32::max);
+        let scroll_h = total_content_h.max(viewport_size.y);
+        let inner_canvas_size = egui::vec2(viewport_size.x, scroll_h);
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            // Fixed canvas to mirror generated app
-            let canvas = egui::Rect::from_min_size(ui.min_rect().min, self.project.canvas_size);
-            self.live_center = Some(canvas);
-
-            let (resp, _) = ui.allocate_painter(canvas.size(), egui::Sense::hover());
-            let painter_rect = egui::Rect::from_min_size(canvas.min, canvas.size());
-
-            if self.show_grid {
-                self.draw_grid(ui, painter_rect);
-            }
-
-            // Draw Center + Free widgets inside the center canvas
-            for wid in center_ids {
-                Self::draw_widget_tree(
-                    ui,
-                    painter_rect,
-                    self.grid_size,
-                    &mut self.selected,
-                    wid,
-                    &mut self.project.widgets,
-                    &mut triggered_actions,
+            // Viewport info banner
+            let screen_name = self.project.screen_preset.display_name();
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(format!(
+                        "Viewport: {} ({:.0} x {:.0})",
+                        screen_name, viewport_size.x, viewport_size.y
+                    ))
+                    .strong()
+                    .size(11.0),
                 );
-            }
-            for wid in free_ids {
-                Self::draw_widget_tree(
-                    ui,
-                    painter_rect,
-                    self.grid_size,
-                    &mut self.selected,
-                    wid,
-                    &mut self.project.widgets,
-                    &mut triggered_actions,
+                ui.separator();
+                ui.label(
+                    egui::RichText::new(format!("Root Layout: {}", effective_root_mode.display_name()))
+                        .weak()
+                        .size(11.0),
                 );
-            }
+            });
+            ui.add_space(2.0);
+
+            // Container frame for device screen
+            egui::Frame::NONE
+                .stroke(Stroke::new(1.0_f32, Color32::from_gray(65)))
+                .corner_radius(4.0)
+                .fill(ui.visuals().panel_fill)
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("device_screen_scroll")
+                        .max_width(viewport_size.x)
+                        .max_height(viewport_size.y)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            let (resp, painter) = ui.allocate_painter(inner_canvas_size, egui::Sense::click());
+                            let painter_rect = Rect::from_min_size(resp.rect.min, inner_canvas_size);
+                            self.live_center = Some(ui.clip_rect());
+                            self.live_center_origin = Some(painter_rect.min);
+
+                            // Canvas background
+                            painter.rect_filled(painter_rect, 0.0, ui.visuals().window_fill());
+
+                            if self.show_grid {
+                                self.draw_grid(ui, painter_rect);
+                            }
+
+                            for wid in &root_ids {
+                                Self::draw_widget_tree(
+                                    ui,
+                                    painter_rect,
+                                    self.grid_size,
+                                    &mut self.selected,
+                                    *wid,
+                                    &mut self.project.widgets,
+                                    &mut triggered_actions,
+                                    effective_root_mode != LayoutMode::Free,
+                                );
+                            }
+
+                            if resp.clicked() {
+                                self.selected.clear();
+                            }
+                        });
+                });
 
             // --- Drag ghost + drop ---
             if let Some(kind) = self.spawning {
@@ -2097,10 +2249,6 @@ impl RadBuilderApp {
                     }
                     self.spawning = None;
                 }
-            }
-
-            if resp.clicked() {
-                self.selected.clear();
             }
         });
 
@@ -2492,6 +2640,7 @@ impl RadBuilderApp {
         widget_id: WidgetId,
         widgets: &mut [Widget],
         triggered: &mut Vec<ActionEffect>,
+        is_in_auto_layout: bool,
     ) {
         let idx = match widgets.iter().position(|w| w.id == widget_id) {
             Some(i) => i,
@@ -2536,6 +2685,7 @@ impl RadBuilderApp {
                     &mut widgets[idx],
                     has_children,
                     triggered,
+                    is_in_auto_layout,
                 );
             });
         } else {
@@ -2547,6 +2697,7 @@ impl RadBuilderApp {
                 &mut widgets[idx],
                 has_children,
                 triggered,
+                is_in_auto_layout,
             );
         }
 
@@ -2629,7 +2780,7 @@ impl RadBuilderApp {
 
             if effective_layout_mode == LayoutMode::Free {
                 for (cid, _) in &children {
-                    Self::draw_widget_tree(ui, inner_rect, grid_size, selected, *cid, widgets, triggered);
+                    Self::draw_widget_tree(ui, inner_rect, grid_size, selected, *cid, widgets, triggered, false);
                 }
 
                 // Auto-sizing height in Free mode
@@ -2682,9 +2833,10 @@ impl RadBuilderApp {
                         rel_rect.size(),
                     );
                     if let Some(cw) = widgets.iter_mut().find(|x| x.id == cid) {
+                        cw.pos = egui::Pos2::ZERO;
                         cw.size = rel_rect.size().max(egui::Vec2::splat(1.0));
                     }
-                    Self::draw_widget_tree(ui, child_container_rect, grid_size, selected, cid, widgets, triggered);
+                    Self::draw_widget_tree(ui, child_container_rect, grid_size, selected, cid, widgets, triggered, true);
                 }
             }
         }
@@ -2698,6 +2850,7 @@ impl RadBuilderApp {
         w: &mut Widget,
         has_children: bool,
         triggered: &mut Vec<ActionEffect>,
+        is_in_auto_layout: bool,
     ) {
         let is_edit_mode = ui
             .ctx()
@@ -3235,17 +3388,13 @@ impl RadBuilderApp {
                     selected.push(w.id);
                 }
             }
-            if drag_delta != egui::Vec2::ZERO {
-                // If the widget is positioned by an auto-layout parent, do not mutate its absolute pos
-                let is_auto_laid_out = w.parent.is_some() && (w.props.width_policy != SizePolicy::Fixed || w.props.height_policy != SizePolicy::Fixed);
-                if !is_auto_laid_out {
-                    w.pos += drag_delta;
-                    w.pos = snap_pos_with_grid(w.pos, grid);
-                    let maxx = (canvas_rect.width() - w.size.x).max(0.0);
-                    let maxy = (canvas_rect.height() - w.size.y).max(0.0);
-                    w.pos.x = w.pos.x.clamp(0.0, maxx);
-                    w.pos.y = w.pos.y.clamp(0.0, maxy);
-                }
+            if drag_delta != egui::Vec2::ZERO && !is_in_auto_layout {
+                w.pos += drag_delta;
+                w.pos = snap_pos_with_grid(w.pos, grid);
+                let maxx = (canvas_rect.width() - w.size.x).max(0.0);
+                let maxy = (canvas_rect.height() - w.size.y).max(0.0);
+                w.pos.x = w.pos.x.clamp(0.0, maxx);
+                w.pos.y = w.pos.y.clamp(0.0, maxy);
             }
 
             // resize handle unchanged, plus clamp
@@ -3429,6 +3578,18 @@ impl RadBuilderApp {
                             }
                         }
                     }
+
+                    // Render Screen (Root) header item
+                    let is_screen_selected = self.selected.is_empty();
+                    let mode_name = self.project.root_layout_mode.display_name();
+                    let screen_title = format!("Screen (Root) [{}]", mode_name);
+                    ui.horizontal(|ui| {
+                        let btn = ui.selectable_label(is_screen_selected, screen_title);
+                        if btn.clicked() {
+                            self.selected.clear();
+                        }
+                    });
+                    ui.add_space(2.0);
 
                     // Render tree recursively starting from root widgets (parent == None)
                     let root_ids: Vec<WidgetId> = {
@@ -3747,14 +3908,165 @@ impl RadBuilderApp {
         }
     }
 
+    fn root_screen_inspector_ui(&mut self, ui: &mut egui::Ui) {
+        ui.push_id("screen_root_inspector", |ui| {
+            ui.heading("Screen (Root Container)");
+            ui.separator();
+
+            ui.label(egui::RichText::new("Device Viewport & Canvas").strong());
+
+            // Device preset selector
+            ui.horizontal(|ui| {
+                ui.label("Preset:");
+                egui::ComboBox::from_id_salt("screen_preset_combo")
+                    .selected_text(self.project.screen_preset.display_name())
+                    .show_ui(ui, |ui| {
+                        for preset in ScreenPreset::all() {
+                            let selected = self.project.screen_preset == *preset;
+                            if ui.selectable_label(selected, preset.display_name()).clicked() {
+                                self.push_undo();
+                                self.project.screen_preset = *preset;
+                                if let Some(dim) = preset.dimensions() {
+                                    self.project.canvas_size = dim;
+                                }
+                            }
+                        }
+                    });
+            });
+
+            // Dimensions + Rotate
+            ui.horizontal(|ui| {
+                ui.label("Size:");
+                let w_resp = ui.add(egui::DragValue::new(&mut self.project.canvas_size.x).range(200.0..=4096.0).suffix(" w"));
+                let h_resp = ui.add(egui::DragValue::new(&mut self.project.canvas_size.y).range(200.0..=4096.0).suffix(" h"));
+                if w_resp.changed() || h_resp.changed() {
+                    self.project.screen_preset = ScreenPreset::Custom;
+                }
+                if ui.button("Rotate").on_hover_text("Swap width and height").clicked() {
+                    self.push_undo();
+                    let temp = self.project.canvas_size.x;
+                    self.project.canvas_size.x = self.project.canvas_size.y;
+                    self.project.canvas_size.y = temp;
+                    self.project.screen_preset = ScreenPreset::Custom;
+                }
+            });
+
+            ui.separator();
+            ui.label(egui::RichText::new("Screen Auto-Layout").strong());
+
+            // Root Layout Mode ComboBox
+            ui.horizontal(|ui| {
+                ui.label("Layout Mode:");
+                let prev_mode = self.project.root_layout_mode;
+                egui::ComboBox::from_id_salt("root_layout_mode_combo")
+                    .selected_text(self.project.root_layout_mode.display_name())
+                    .show_ui(ui, |ui| {
+                        for m in &[
+                            LayoutMode::Free,
+                            LayoutMode::Column,
+                            LayoutMode::Row,
+                            LayoutMode::WrapRow,
+                            LayoutMode::Grid,
+                        ] {
+                            ui.selectable_value(&mut self.project.root_layout_mode, *m, m.display_name());
+                        }
+                    });
+                if self.project.root_layout_mode != prev_mode {
+                    self.push_undo();
+                }
+            });
+
+            if self.project.root_layout_mode != LayoutMode::Free {
+                // Gap
+                ui.horizontal(|ui| {
+                    ui.label("Item Gap:");
+                    ui.add(egui::DragValue::new(&mut self.project.root_layout_gap).range(0.0..=100.0).suffix(" px"));
+                });
+
+                // Columns (if Grid)
+                if self.project.root_layout_mode == LayoutMode::Grid {
+                    ui.horizontal(|ui| {
+                        ui.label("Columns:");
+                        ui.add(egui::DragValue::new(&mut self.project.root_layout_cols).range(1..=12));
+                    });
+                }
+
+                // Align & Justify
+                if matches!(self.project.root_layout_mode, LayoutMode::Row | LayoutMode::Column) {
+                    ui.horizontal(|ui| {
+                        ui.label("Align (Cross):");
+                        egui::ComboBox::from_id_salt("root_align_combo")
+                            .selected_text(self.project.root_layout_align.display_name())
+                            .show_ui(ui, |ui| {
+                                for a in &[Align::Start, Align::Center, Align::End, Align::Stretch] {
+                                    ui.selectable_value(&mut self.project.root_layout_align, *a, a.display_name());
+                                }
+                            });
+                    });
+
+                    ui.horizontal(|ui| {
+                        ui.label("Justify (Main):");
+                        egui::ComboBox::from_id_salt("root_justify_combo")
+                            .selected_text(self.project.root_layout_justify.display_name())
+                            .show_ui(ui, |ui| {
+                                for j in &[
+                                    Justify::Start,
+                                    Justify::Center,
+                                    Justify::End,
+                                    Justify::SpaceBetween,
+                                    Justify::SpaceAround,
+                                    Justify::SpaceEvenly,
+                                ] {
+                                    ui.selectable_value(&mut self.project.root_layout_justify, *j, j.display_name());
+                                }
+                            });
+                    });
+                }
+
+                // Padding: Top, Right, Bottom, Left
+                ui.label(egui::RichText::new("Padding").strong());
+                ui.horizontal(|ui| {
+                    ui.label("T:");
+                    ui.add(egui::DragValue::new(&mut self.project.root_layout_padding[0]).range(0.0..=100.0));
+                    ui.label("R:");
+                    ui.add(egui::DragValue::new(&mut self.project.root_layout_padding[1]).range(0.0..=100.0));
+                    ui.label("B:");
+                    ui.add(egui::DragValue::new(&mut self.project.root_layout_padding[2]).range(0.0..=100.0));
+                    ui.label("L:");
+                    ui.add(egui::DragValue::new(&mut self.project.root_layout_padding[3]).range(0.0..=100.0));
+                });
+
+                // Responsive Layout Rule
+                ui.separator();
+                ui.label(egui::RichText::new("Responsive Rule (Media Query)").strong());
+                ui.horizontal(|ui| {
+                    ui.label("Rule:");
+                    egui::ComboBox::from_id_salt("root_responsive_layout_combo")
+                        .selected_text(self.project.root_responsive_layout.display_name())
+                        .show_ui(ui, |ui| {
+                            for r in &[
+                                crate::widget::ResponsiveLayout::None,
+                                crate::widget::ResponsiveLayout::RowToColumnOnPortrait,
+                            ] {
+                                ui.selectable_value(&mut self.project.root_responsive_layout, *r, r.display_name());
+                            }
+                        });
+                });
+                if self.project.root_responsive_layout == crate::widget::ResponsiveLayout::RowToColumnOnPortrait {
+                    ui.label(
+                        egui::RichText::new("Automatically switches Row to Column when viewport height > width (portrait / mobile).")
+                            .italics()
+                            .weak(),
+                    );
+                }
+            }
+        });
+    }
+
     fn inspector_ui(&mut self, ui: &mut egui::Ui) {
         let grid = self.grid_size; // read before mutably borrowing self
         let Some(&sel_id) = self.selected.first() else {
-            ui.push_id("inspector_ui", |ui| {
-                ui.heading("Inspector");
-                ui.separator();
-                ui.weak("No selection");
-            });
+            self.root_screen_inspector_ui(ui);
             return;
         };
 
@@ -3786,7 +4098,7 @@ impl RadBuilderApp {
             .collect();
 
         let parent_label = match current_parent {
-            None => "(None - Root)".to_string(),
+            None => "Screen (Root)".to_string(),
             Some(pid) => {
                 if let Some(pw) = self.project.widgets.iter().find(|x| x.id == pid) {
                     let name = if pw.props.name.is_empty() {
@@ -3801,10 +4113,16 @@ impl RadBuilderApp {
             }
         };
 
-        let parent_layout_mode = current_parent
-            .and_then(|pid| self.project.widgets.iter().find(|x| x.id == pid))
-            .map(|pw| pw.props.layout_mode)
-            .unwrap_or(LayoutMode::Free);
+        let parent_layout_mode = match current_parent {
+            Some(pid) => self
+                .project
+                .widgets
+                .iter()
+                .find(|x| x.id == pid)
+                .map(|pw| pw.props.layout_mode)
+                .unwrap_or(LayoutMode::Free),
+            None => self.project.root_layout_mode,
+        };
 
         let parent_tab_items: Vec<String> = current_parent
             .and_then(|pid| self.project.widgets.iter().find(|x| x.id == pid))
@@ -4086,7 +4404,7 @@ impl RadBuilderApp {
                     egui::ComboBox::from_id_salt(("parent_select", w.id))
                         .selected_text(&parent_label)
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut new_parent, None, "(None - Root)");
+                            ui.selectable_value(&mut new_parent, None, "Screen (Root)");
                             for (pid, label) in &potential_parents {
                                 ui.selectable_value(&mut new_parent, Some(*pid), label);
                             }
@@ -4227,7 +4545,8 @@ impl RadBuilderApp {
                 let parent_has_auto_layout = parent_layout_mode != LayoutMode::Free;
 
                 if parent_has_auto_layout {
-                    ui.label(egui::RichText::new("Position: Auto-managed by parent").italics().weak());
+                    let parent_desc = if current_parent.is_some() { "parent container" } else { "Screen (Root)" };
+                    ui.label(egui::RichText::new(format!("Position: Auto-managed by {}", parent_desc)).italics().weak());
                     ui.label(egui::RichText::new("Size Policy").strong());
 
                     // Width Policy
@@ -6613,20 +6932,124 @@ impl RadBuilderApp {
         out.push_str("            });\n");
         out.push_str("    }\n");
 
-        // CENTER (+ FREE): use CentralPanel; widgets are placed absolutely within it.
+        // CENTER (+ FREE): use CentralPanel; widgets are placed within it.
         out.push_str("    egui::CentralPanel::default().show(ctx, |ui| {\n");
-        // fixed logical canvas (keeps your designed size)
-        out.push_str(&format!(
-			"        let canvas = egui::Rect::from_min_size(ui.min_rect().min, egui::vec2({:.1}, {:.1}));\n",
-			self.project.canvas_size.x, self.project.canvas_size.y
-		));
-        out.push_str("        let _ = ui.allocate_painter(canvas.size(), egui::Sense::hover());\n");
-        for w in center {
-            emit_widget(&emit_ctx, w, &mut out, "canvas.min");
+        out.push_str("        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {\n");
+
+        if self.project.root_layout_mode == LayoutMode::Free {
+            out.push_str(&format!(
+                "            let canvas = egui::Rect::from_min_size(ui.min_rect().min, egui::vec2({:.1}, {:.1}));\n",
+                self.project.canvas_size.x, self.project.canvas_size.y
+            ));
+            out.push_str("            let _ = ui.allocate_painter(canvas.size(), egui::Sense::hover());\n");
+            for w in center {
+                emit_widget(&emit_ctx, w, &mut out, "canvas.min");
+            }
+            for w in free {
+                emit_widget(&emit_ctx, w, &mut out, "canvas.min");
+            }
+        } else {
+            let mut all_center_roots = center;
+            all_center_roots.extend(free);
+            all_center_roots.sort_by_key(|w| w.z);
+
+            let p_top = self.project.root_layout_padding[0];
+            let p_right = self.project.root_layout_padding[1];
+            let p_bottom = self.project.root_layout_padding[2];
+            let p_left = self.project.root_layout_padding[3];
+            let has_padding = p_top > 0.0 || p_right > 0.0 || p_bottom > 0.0 || p_left > 0.0;
+
+            let indent = if has_padding { "                " } else { "            " };
+
+            if has_padding {
+                out.push_str(&format!(
+                    "            egui::Frame::NONE.inner_margin(egui::Margin {{ top: {:.1}, right: {:.1}, bottom: {:.1}, left: {:.1} }}).show(ui, |ui| {{\n",
+                    p_top, p_right, p_bottom, p_left
+                ));
+            }
+
+            match self.project.root_layout_mode {
+                LayoutMode::Free => unreachable!(),
+                LayoutMode::Column => {
+                    out.push_str(&format!("{indent}ui.vertical(|ui| {{\n"));
+                    for (i, w) in all_center_roots.iter().enumerate() {
+                        if i > 0 && self.project.root_layout_gap > 0.0 {
+                            out.push_str(&format!("{indent}    ui.add_space({:.1});\n", self.project.root_layout_gap));
+                        }
+                        emit_widget(&emit_ctx, w, &mut out, "ui.min_rect().min");
+                    }
+                    out.push_str(&format!("{indent}}});\n"));
+                }
+                LayoutMode::Row => {
+                    let justify_str = match self.project.root_layout_justify {
+                        Justify::Start => "egui::Align::Min",
+                        Justify::Center => "egui::Align::Center",
+                        Justify::End => "egui::Align::Max",
+                        _ => "egui::Align::Min",
+                    };
+                    if self.project.root_responsive_layout == crate::widget::ResponsiveLayout::RowToColumnOnPortrait {
+                        out.push_str(&format!("{indent}if ui.available_height() > ui.available_width() {{\n"));
+                        out.push_str(&format!("{indent}    ui.vertical(|ui| {{\n"));
+                        for (i, w) in all_center_roots.iter().enumerate() {
+                            if i > 0 && self.project.root_layout_gap > 0.0 {
+                                out.push_str(&format!("{indent}        ui.add_space({:.1});\n", self.project.root_layout_gap));
+                            }
+                            emit_widget(&emit_ctx, w, &mut out, "ui.min_rect().min");
+                        }
+                        out.push_str(&format!("{indent}    }});\n"));
+                        out.push_str(&format!("{indent}}} else {{\n"));
+                        out.push_str(&format!("{indent}    ui.with_layout(egui::Layout::left_to_right({justify_str}), |ui| {{\n"));
+                        for (i, w) in all_center_roots.iter().enumerate() {
+                            if i > 0 && self.project.root_layout_gap > 0.0 {
+                                out.push_str(&format!("{indent}        ui.add_space({:.1});\n", self.project.root_layout_gap));
+                            }
+                            emit_widget(&emit_ctx, w, &mut out, "ui.min_rect().min");
+                        }
+                        out.push_str(&format!("{indent}    }});\n"));
+                        out.push_str(&format!("{indent}}}\n"));
+                    } else {
+                        out.push_str(&format!("{indent}ui.with_layout(egui::Layout::left_to_right({justify_str}), |ui| {{\n"));
+                        for (i, w) in all_center_roots.iter().enumerate() {
+                            if i > 0 && self.project.root_layout_gap > 0.0 {
+                                out.push_str(&format!("{indent}    ui.add_space({:.1});\n", self.project.root_layout_gap));
+                            }
+                            emit_widget(&emit_ctx, w, &mut out, "ui.min_rect().min");
+                        }
+                        out.push_str(&format!("{indent}}});\n"));
+                    }
+                }
+                LayoutMode::WrapRow => {
+                    out.push_str(&format!("{indent}ui.horizontal_wrapped(|ui| {{\n"));
+                    for (i, w) in all_center_roots.iter().enumerate() {
+                        if i > 0 && self.project.root_layout_gap > 0.0 {
+                            out.push_str(&format!("{indent}    ui.add_space({:.1});\n", self.project.root_layout_gap));
+                        }
+                        emit_widget(&emit_ctx, w, &mut out, "ui.min_rect().min");
+                    }
+                    out.push_str(&format!("{indent}}});\n"));
+                }
+                LayoutMode::Grid => {
+                    let cols = self.project.root_layout_cols.max(1);
+                    out.push_str(&format!("{indent}egui::Grid::new(\"root_screen_grid\").spacing([{:?}, {:?}]).show(ui, |ui| {{\n", self.project.root_layout_gap, self.project.root_layout_gap));
+                    for (i, w) in all_center_roots.iter().enumerate() {
+                        emit_widget(&emit_ctx, w, &mut out, "ui.min_rect().min");
+                        if (i + 1) % cols == 0 {
+                            out.push_str(&format!("{indent}    ui.end_row();\n"));
+                        }
+                    }
+                    if all_center_roots.len() % cols != 0 {
+                        out.push_str(&format!("{indent}    ui.end_row();\n"));
+                    }
+                    out.push_str(&format!("{indent}}});\n"));
+                }
+            }
+
+            if has_padding {
+                out.push_str("            });\n");
+            }
         }
-        for w in free {
-            emit_widget(&emit_ctx, w, &mut out, "canvas.min");
-        }
+
+        out.push_str("        });\n");
         out.push_str("    });\n");
 
         out.push_str("}\n\n");
