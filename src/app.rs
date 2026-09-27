@@ -640,6 +640,7 @@ mod tests {
             Justify::Start,
             padding,
             &children,
+            false,
         );
 
         assert_eq!(rects.len(), 3);
@@ -683,6 +684,7 @@ mod tests {
             Justify::Center,
             padding,
             &children,
+            false,
         );
 
         assert_eq!(rects.len(), 2);
@@ -895,6 +897,251 @@ mod tests {
         }
         let code = app.generate_single_file();
         assert!(!code.is_empty());
+    }
+
+    #[test]
+    fn test_compute_auto_layout_column_hug_height() {
+        use crate::widget::{Align, Justify, LayoutMode, SizePolicy, WidgetId};
+
+        let container_size = egui::vec2(100.0, 500.0);
+        let gap = 10.0;
+        let padding = [0.0; 4];
+
+        // Two children with Fill height policy in a 500px container
+        let children = vec![
+            (WidgetId::new(1), egui::vec2(80.0, 40.0), SizePolicy::Fixed, SizePolicy::Fill, None),
+            (WidgetId::new(2), egui::vec2(80.0, 60.0), SizePolicy::Fixed, SizePolicy::Fill, None),
+        ];
+
+        // When hug_height is true, children must NOT expand to fill 500px; they must use natural sizes (40 and 60)
+        let rects = super::RadBuilderApp::compute_auto_layout(
+            container_size,
+            LayoutMode::Column,
+            gap,
+            1,
+            Align::Start,
+            Justify::Start,
+            padding,
+            &children,
+            true,
+        );
+
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0].1.height(), 40.0);
+        assert_eq!(rects[1].1.height(), 60.0);
+        assert_eq!(rects[1].1.min.y, 50.0); // 40 + 10 gap
+    }
+
+    #[test]
+    fn test_collapsing_header_auto_size_y_stable() {
+        use crate::widget::{DockArea, LayoutMode, SizePolicy, WidgetId, WidgetKind, WidgetProps};
+
+        let mut app = super::RadBuilderApp::default();
+        app.project.canvas_size = egui::vec2(600.0, 800.0);
+
+        // Collapsing header with Column layout and auto_size_y = true
+        app.project.widgets.push(crate::widget::Widget {
+            id: WidgetId::new(100),
+            kind: WidgetKind::CollapsingHeader,
+            pos: egui::pos2(10.0, 10.0),
+            size: egui::vec2(300.0, 100.0),
+            z: 1,
+            area: DockArea::Center,
+            props: WidgetProps {
+                text: "Section".to_string(),
+                checked: true,
+                active: true,
+                auto_size_y: true,
+                layout_mode: LayoutMode::Column,
+                layout_gap: 10.0,
+                layout_padding: [8.0, 8.0, 8.0, 8.0],
+                ..WidgetProps::default()
+            },
+            parent: None,
+        });
+
+        // Two children with Fill height policy (identical to the user's project setup)
+        app.project.widgets.push(crate::widget::Widget {
+            id: WidgetId::new(101),
+            kind: WidgetKind::Group,
+            pos: egui::pos2(0.0, 0.0),
+            size: egui::vec2(280.0, 50.0),
+            z: 2,
+            area: DockArea::Center,
+            props: WidgetProps {
+                text: "Child 1".to_string(),
+                active: true,
+                height_policy: SizePolicy::Fill,
+                ..WidgetProps::default()
+            },
+            parent: Some(WidgetId::new(100)),
+        });
+
+        app.project.widgets.push(crate::widget::Widget {
+            id: WidgetId::new(102),
+            kind: WidgetKind::Group,
+            pos: egui::pos2(0.0, 0.0),
+            size: egui::vec2(280.0, 60.0),
+            z: 3,
+            area: DockArea::Center,
+            props: WidgetProps {
+                text: "Child 2".to_string(),
+                active: true,
+                height_policy: SizePolicy::Fill,
+                ..WidgetProps::default()
+            },
+            parent: Some(WidgetId::new(100)),
+        });
+
+        let ctx = egui::Context::default();
+        let mut heights = Vec::new();
+        // Run 30 consecutive simulated frames
+        for _ in 0..30 {
+            let _ = ctx.run(egui::RawInput::default(), |ctx| {
+                app.preview_panels_ui(ctx);
+            });
+            if let Some(h) = app.project.widgets.iter().find(|w| w.id == WidgetId::new(100)).map(|w| w.size.y) {
+                heights.push(h);
+            }
+        }
+
+        // Height must be stable across frames, NOT growing to infinity
+        let first = heights[2];
+        let last = *heights.last().unwrap();
+        assert!(
+            (first - last).abs() <= 1.0,
+            "auto_size_y must not grow to infinity! Frame 2: {}, Frame 29: {}",
+            first,
+            last
+        );
+    }
+
+    #[test]
+    fn test_collapsing_header_collapse_and_expand_height() {
+        use crate::widget::{DockArea, WidgetId, WidgetKind, WidgetProps};
+
+        let mut app = super::RadBuilderApp::default();
+        app.project.canvas_size = egui::vec2(400.0, 400.0);
+
+        // Header initially open with height 200px
+        app.project.widgets.push(crate::widget::Widget {
+            id: WidgetId::new(200),
+            kind: WidgetKind::CollapsingHeader,
+            pos: egui::pos2(20.0, 20.0),
+            size: egui::vec2(250.0, 200.0),
+            z: 1,
+            area: DockArea::Center,
+            props: WidgetProps {
+                text: "My Section".to_string(),
+                checked: true,
+                active: true,
+                auto_size_y: false,
+                ..WidgetProps::default()
+            },
+            parent: None,
+        });
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.preview_panels_ui(ctx);
+        });
+
+        // Close header
+        if let Some(w) = app.project.widgets.iter_mut().find(|w| w.id == WidgetId::new(200)) {
+            w.props.checked = false;
+        }
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.preview_panels_ui(ctx);
+        });
+
+        let w = app.project.widgets.iter().find(|w| w.id == WidgetId::new(200)).unwrap();
+        assert_eq!(w.size.y, 26.0, "collapsed header must shrink to 26px");
+        assert_eq!(w.props.expanded_height, Some(200.0), "expanded height must be preserved");
+
+        // Re-open header
+        if let Some(w) = app.project.widgets.iter_mut().find(|w| w.id == WidgetId::new(200)) {
+            w.props.checked = true;
+        }
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.preview_panels_ui(ctx);
+        });
+
+        let w = app.project.widgets.iter().find(|w| w.id == WidgetId::new(200)).unwrap();
+        assert_eq!(w.size.y, 200.0, "re-opened header must restore its previous expanded height");
+    }
+
+    #[test]
+    fn test_collapsing_header_shifts_sibling_widgets_below() {
+        use crate::widget::{DockArea, WidgetId, WidgetKind, WidgetProps};
+
+        let mut app = super::RadBuilderApp::default();
+        app.project.canvas_size = egui::vec2(400.0, 600.0);
+
+        // Header at y = 50.0 with height 100.0 (bottom is at 150.0)
+        app.project.widgets.push(crate::widget::Widget {
+            id: WidgetId::new(300),
+            kind: WidgetKind::CollapsingHeader,
+            pos: egui::pos2(20.0, 50.0),
+            size: egui::vec2(250.0, 100.0),
+            z: 1,
+            area: DockArea::Center,
+            props: WidgetProps {
+                text: "Header".to_string(),
+                checked: true,
+                active: true,
+                auto_size_y: false,
+                ..WidgetProps::default()
+            },
+            parent: None,
+        });
+
+        // Sibling widget at y = 160.0 (10px below the header)
+        app.project.widgets.push(crate::widget::Widget {
+            id: WidgetId::new(301),
+            kind: WidgetKind::Button,
+            pos: egui::pos2(20.0, 160.0),
+            size: egui::vec2(100.0, 30.0),
+            z: 2,
+            area: DockArea::Center,
+            props: WidgetProps {
+                text: "Below".to_string(),
+                active: true,
+                ..WidgetProps::default()
+            },
+            parent: None,
+        });
+
+        let ctx = egui::Context::default();
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.preview_panels_ui(ctx);
+        });
+
+        // Collapse header: height changes from 100.0 to 26.0 (delta = -74.0)
+        if let Some(w) = app.project.widgets.iter_mut().find(|w| w.id == WidgetId::new(300)) {
+            w.props.checked = false;
+        }
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.preview_panels_ui(ctx);
+        });
+
+        let btn = app.project.widgets.iter().find(|w| w.id == WidgetId::new(301)).unwrap();
+        // Button should have shifted up by 74px: 160.0 - 74.0 = 86.0
+        assert_eq!(btn.pos.y, 86.0, "widget below collapsed header must shift up by delta_h");
+
+        // Re-expand header: height changes from 26.0 back to 100.0 (delta = +74.0)
+        if let Some(w) = app.project.widgets.iter_mut().find(|w| w.id == WidgetId::new(300)) {
+            w.props.checked = true;
+        }
+
+        let _ = ctx.run(egui::RawInput::default(), |ctx| {
+            app.preview_panels_ui(ctx);
+        });
+
+        let btn = app.project.widgets.iter().find(|w| w.id == WidgetId::new(301)).unwrap();
+        assert_eq!(btn.pos.y, 160.0, "widget below re-expanded header must shift back down to original position");
     }
 
     #[test]
@@ -1954,6 +2201,7 @@ impl RadBuilderApp {
         justify: Justify,
         padding: [f32; 4],
         children_props: &[(WidgetId, egui::Vec2, SizePolicy, SizePolicy, Option<Align>)],
+        hug_height: bool,
     ) -> Vec<(WidgetId, Rect)> {
         let mut results = Vec::new();
         if children_props.is_empty() {
@@ -2023,31 +2271,32 @@ impl RadBuilderApp {
                         Align::Start => {
                             let h = match h_pol {
                                 SizePolicy::Fixed => sz.y,
-                                SizePolicy::Percent(p) => (avail_h * (p / 100.0)).max(0.0),
-                                SizePolicy::Fill => avail_h,
+                                SizePolicy::Percent(p) => if hug_height { sz.y } else { (avail_h * (p / 100.0)).max(0.0) },
+                                SizePolicy::Fill => if hug_height { sz.y } else { avail_h },
                             };
                             (pad_top, h)
                         }
                         Align::Center => {
                             let h = match h_pol {
                                 SizePolicy::Fixed => sz.y,
-                                SizePolicy::Percent(p) => (avail_h * (p / 100.0)).max(0.0),
-                                SizePolicy::Fill => avail_h,
+                                SizePolicy::Percent(p) => if hug_height { sz.y } else { (avail_h * (p / 100.0)).max(0.0) },
+                                SizePolicy::Fill => if hug_height { sz.y } else { avail_h },
                             };
-                            let y = pad_top + (avail_h - h).max(0.0) / 2.0;
+                            let y = if hug_height { pad_top } else { pad_top + (avail_h - h).max(0.0) / 2.0 };
                             (y, h)
                         }
                         Align::End => {
                             let h = match h_pol {
                                 SizePolicy::Fixed => sz.y,
-                                SizePolicy::Percent(p) => (avail_h * (p / 100.0)).max(0.0),
-                                SizePolicy::Fill => avail_h,
+                                SizePolicy::Percent(p) => if hug_height { sz.y } else { (avail_h * (p / 100.0)).max(0.0) },
+                                SizePolicy::Fill => if hug_height { sz.y } else { avail_h },
                             };
-                            let y = pad_top + (avail_h - h).max(0.0);
+                            let y = if hug_height { pad_top } else { pad_top + (avail_h - h).max(0.0) };
                             (y, h)
                         }
                         Align::Stretch => {
-                            (pad_top, avail_h)
+                            let h = if hug_height { sz.y } else { avail_h };
+                            (pad_top, h)
                         }
                     };
 
@@ -2064,16 +2313,32 @@ impl RadBuilderApp {
                 for &(_, sz, _, h_pol, _) in children_props {
                     match h_pol {
                         SizePolicy::Fixed => fixed_h_total += sz.y,
-                        SizePolicy::Percent(p) => fixed_h_total += (avail_h * (p / 100.0)).max(0.0),
-                        SizePolicy::Fill => fill_count += 1,
+                        SizePolicy::Percent(p) => {
+                            if hug_height {
+                                fixed_h_total += sz.y;
+                            } else {
+                                fixed_h_total += (avail_h * (p / 100.0)).max(0.0);
+                            }
+                        }
+                        SizePolicy::Fill => {
+                            if hug_height {
+                                fixed_h_total += sz.y;
+                            } else {
+                                fill_count += 1;
+                            }
+                        }
                     }
                 }
 
-                let remaining_h = (avail_h - fixed_h_total - total_gaps).max(0.0);
+                let remaining_h = if hug_height {
+                    0.0
+                } else {
+                    (avail_h - fixed_h_total - total_gaps).max(0.0)
+                };
                 let fill_unit_h = if fill_count > 0 { remaining_h / fill_count as f32 } else { 0.0 };
 
                 let total_content_h = fixed_h_total + (fill_unit_h * fill_count as f32) + total_gaps;
-                let spare_main = (avail_h - total_content_h).max(0.0);
+                let spare_main = if hug_height { 0.0 } else { (avail_h - total_content_h).max(0.0) };
 
                 let (start_offset_y, gap_stride) = match justify {
                     Justify::Start => (0.0, gap),
@@ -2097,8 +2362,20 @@ impl RadBuilderApp {
                 for &(cid, sz, w_pol, h_pol, self_align) in children_props {
                     let h = match h_pol {
                         SizePolicy::Fixed => sz.y,
-                        SizePolicy::Percent(p) => (avail_h * (p / 100.0)).max(0.0),
-                        SizePolicy::Fill => fill_unit_h,
+                        SizePolicy::Percent(p) => {
+                            if hug_height {
+                                sz.y
+                            } else {
+                                (avail_h * (p / 100.0)).max(0.0)
+                            }
+                        }
+                        SizePolicy::Fill => {
+                            if hug_height {
+                                sz.y
+                            } else {
+                                fill_unit_h
+                            }
+                        }
                     };
 
                     let effective_align = self_align.unwrap_or(align);
@@ -2151,7 +2428,7 @@ impl RadBuilderApp {
                     };
                     let h = match h_pol {
                         SizePolicy::Fixed => sz.y,
-                        SizePolicy::Percent(p) => (avail_h * (p / 100.0)).max(0.0),
+                        SizePolicy::Percent(p) => if hug_height { sz.y } else { (avail_h * (p / 100.0)).max(0.0) },
                         SizePolicy::Fill => sz.y,
                     };
 
@@ -2184,7 +2461,7 @@ impl RadBuilderApp {
                     };
                     let h = match h_pol {
                         SizePolicy::Fixed => sz.y,
-                        SizePolicy::Percent(p) => (avail_h * (p / 100.0)).max(0.0),
+                        SizePolicy::Percent(p) => if hug_height { sz.y } else { (avail_h * (p / 100.0)).max(0.0) },
                         SizePolicy::Fill => sz.y,
                     };
 
@@ -2273,6 +2550,43 @@ impl RadBuilderApp {
             );
         }
 
+        const COLLAPSED_HEADER_H: f32 = 26.0;
+
+        if widgets[idx].kind == WidgetKind::CollapsingHeader {
+            let is_open = widgets[idx].props.checked;
+            if !is_open && widgets[idx].size.y > COLLAPSED_HEADER_H {
+                // Header should be collapsed, but size.y is still at expanded height!
+                let old_h = widgets[idx].size.y;
+                widgets[idx].props.expanded_height = Some(old_h);
+                widgets[idx].size.y = COLLAPSED_HEADER_H;
+
+                let delta_h = COLLAPSED_HEADER_H - old_h;
+                let parent_id = widgets[idx].parent;
+                let my_top = widgets[idx].pos.y;
+                let my_bottom = my_top + old_h;
+                // Shift sibling widgets below it in Free mode
+                for other in widgets.iter_mut() {
+                    if other.id != widget_id && other.parent == parent_id && other.pos.y >= my_bottom - 12.0 {
+                        other.pos.y = (other.pos.y + delta_h).max(my_top + COLLAPSED_HEADER_H);
+                    }
+                }
+            } else if is_open && widgets[idx].size.y <= COLLAPSED_HEADER_H {
+                // Header should be open, but size.y is at collapsed height!
+                let target_h = widgets[idx].props.expanded_height.unwrap_or(80.0).max(COLLAPSED_HEADER_H + 10.0);
+                let delta_h = target_h - widgets[idx].size.y;
+                widgets[idx].size.y = target_h;
+
+                let parent_id = widgets[idx].parent;
+                let my_top = widgets[idx].pos.y;
+                // Shift sibling widgets back down in Free mode
+                for other in widgets.iter_mut() {
+                    if other.id != widget_id && other.parent == parent_id && other.pos.y >= my_top + COLLAPSED_HEADER_H - 4.0 {
+                        other.pos.y += delta_h;
+                    }
+                }
+            }
+        }
+
         if is_container {
             let w = &widgets[idx];
 
@@ -2324,9 +2638,10 @@ impl RadBuilderApp {
                         .iter()
                         .filter_map(|&(cid, _)| widgets.iter().find(|x| x.id == cid).map(|cw| cw.pos.y + cw.size.y))
                         .fold(0.0_f32, f32::max);
-                    let required_h = max_bottom + offset.y + 12.0;
-                    if required_h > 24.0 {
+                    let required_h = max_bottom + offset.y + 6.0;
+                    if required_h > 24.0 && (widgets[idx].size.y - required_h).abs() > 0.5 {
                         widgets[idx].size.y = required_h;
+                        widgets[idx].props.expanded_height = Some(required_h);
                     }
                 }
             } else {
@@ -2348,14 +2663,16 @@ impl RadBuilderApp {
                     w.props.layout_justify,
                     w.props.layout_padding,
                     &children_info,
+                    w.props.auto_size_y,
                 );
 
                 // Auto-sizing height in auto-layout mode
                 if widgets[idx].props.auto_size_y && !layout_rects.is_empty() {
                     let max_bottom = layout_rects.iter().map(|(_, r)| r.max.y).fold(0.0_f32, f32::max);
-                    let required_h = max_bottom + offset.y + w.props.layout_padding[2] + 12.0;
-                    if required_h > 24.0 {
+                    let required_h = max_bottom + offset.y + w.props.layout_padding[2] + 6.0;
+                    if required_h > 24.0 && (widgets[idx].size.y - required_h).abs() > 0.5 {
                         widgets[idx].size.y = required_h;
+                        widgets[idx].props.expanded_height = Some(required_h);
                     }
                 }
 
@@ -5574,9 +5891,89 @@ impl RadBuilderApp {
                     let children = ctx.project.children_of(w.id);
                     if children.is_empty() {
                         out.push_str("                ui.label(\"… place your inner content here …\");\n");
-                    } else {
+                    } else if w.props.layout_mode == LayoutMode::Free {
                         for child in children {
                             emit_widget(ctx, child, out, "ui.min_rect().min");
+                        }
+                    } else {
+                        match w.props.layout_mode {
+                            LayoutMode::Free => unreachable!(),
+                            LayoutMode::Row => {
+                                let justify_str = match w.props.layout_justify {
+                                    Justify::Start => "egui::Align::Min",
+                                    Justify::Center => "egui::Align::Center",
+                                    Justify::End => "egui::Align::Max",
+                                    _ => "egui::Align::Min",
+                                };
+                                if w.props.responsive_layout == crate::widget::ResponsiveLayout::RowToColumnOnPortrait {
+                                    out.push_str("                    if ui.available_height() > ui.available_width() {\n");
+                                    out.push_str("                        ui.vertical(|ui| {\n");
+                                    for (i, child) in children.iter().enumerate() {
+                                        if i > 0 && w.props.layout_gap > 0.0 {
+                                            out.push_str(&format!("                            ui.add_space({:.1});\n", w.props.layout_gap));
+                                        }
+                                        emit_widget(ctx, child, out, "ui.min_rect().min");
+                                    }
+                                    out.push_str("                        });\n");
+                                    out.push_str("                    } else {\n");
+                                    out.push_str(&format!("                        ui.with_layout(egui::Layout::left_to_right({justify_str}), |ui| {{\n"));
+                                    for (i, child) in children.iter().enumerate() {
+                                        if i > 0 && w.props.layout_gap > 0.0 {
+                                            out.push_str(&format!("                            ui.add_space({:.1});\n", w.props.layout_gap));
+                                        }
+                                        emit_widget(ctx, child, out, "ui.min_rect().min");
+                                    }
+                                    out.push_str("                        });\n");
+                                    out.push_str("                    }\n");
+                                } else {
+                                    out.push_str(&format!("                    ui.with_layout(egui::Layout::left_to_right({justify_str}), |ui| {{\n"));
+                                    for (i, child) in children.iter().enumerate() {
+                                        if i > 0 && w.props.layout_gap > 0.0 {
+                                            out.push_str(&format!("                        ui.add_space({:.1});\n", w.props.layout_gap));
+                                        }
+                                        emit_widget(ctx, child, out, "ui.min_rect().min");
+                                    }
+                                    out.push_str("                    });\n");
+                                }
+                            }
+                            LayoutMode::Column => {
+                                out.push_str("                    ui.vertical(|ui| {\n");
+                                for (i, child) in children.iter().enumerate() {
+                                    if i > 0 && w.props.layout_gap > 0.0 {
+                                        out.push_str(&format!("                        ui.add_space({:.1});\n", w.props.layout_gap));
+                                    }
+                                    emit_widget(ctx, child, out, "ui.min_rect().min");
+                                }
+                                out.push_str("                    });\n");
+                            }
+                            LayoutMode::WrapRow => {
+                                out.push_str("                    ui.horizontal_wrapped(|ui| {\n");
+                                for (i, child) in children.iter().enumerate() {
+                                    if i > 0 && w.props.layout_gap > 0.0 {
+                                        out.push_str(&format!("                        ui.add_space({:.1});\n", w.props.layout_gap));
+                                    }
+                                    emit_widget(ctx, child, out, "ui.min_rect().min");
+                                }
+                                out.push_str("                    });\n");
+                            }
+                            LayoutMode::Grid => {
+                                out.push_str(&format!(
+                                    "                    egui::Grid::new(\"grid_{id}\").num_columns({cols}).spacing([{gap:.1}, {gap:.1}]).show(ui, |ui| {{\n",
+                                    id = w.id,
+                                    cols = w.props.layout_cols.max(1),
+                                    gap = w.props.layout_gap
+                                ));
+                                for (i, child) in children.iter().enumerate() {
+                                    emit_widget(ctx, child, out, "ui.min_rect().min");
+                                    if (i + 1) % w.props.layout_cols.max(1) == 0 {
+                                        out.push_str("                        ui.end_row();\n");
+                                    }
+                                }
+                                if children.len() % w.props.layout_cols.max(1) != 0 {
+                                    out.push_str("                        ui.end_row();\n");
+                                }
+                                out.push_str("                    });\n");
+                            }
                         }
                     }
                     out.push_str("            });\n    });\n");

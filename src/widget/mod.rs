@@ -720,6 +720,11 @@ pub(crate) struct WidgetProps {
     #[serde(default = "widget_prop_default_true")]
     pub(crate) auto_size_y: bool,
 
+    /// Saved height when a collapsible container (like CollapsingHeader) is expanded.
+    /// Preserved when the widget collapses so it can be restored on expansion.
+    #[serde(default)]
+    pub(crate) expanded_height: Option<f32>,
+
     // ── Responsive configuration ───────────────────────────────────────────
     /// Conditional visibility based on screen orientation/breakpoint.
     #[serde(default)]
@@ -776,6 +781,7 @@ impl Default for WidgetProps {
             align_self: None,
             tab_page: None,
             auto_size_y: true,
+            expanded_height: None,
             responsive_vis: ResponsiveVisibility::Always,
             responsive_layout: ResponsiveLayout::None,
         }
