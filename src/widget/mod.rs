@@ -137,6 +137,7 @@ pub(crate) enum WidgetKind {
     TabBar,
     Columns,
     Window,
+    Container,
 }
 
 impl WidgetKind {
@@ -181,7 +182,8 @@ impl WidgetKind {
             | WidgetKind::Columns
             | WidgetKind::TabBar
             | WidgetKind::Window
-            | WidgetKind::CollapsingHeader => WidgetCategory::Containers,
+            | WidgetKind::CollapsingHeader
+            | WidgetKind::Container => WidgetCategory::Containers,
 
             // Advanced: complex or specialized widgets
             WidgetKind::MenuButton | WidgetKind::Tree | WidgetKind::Code => {
@@ -228,6 +230,7 @@ impl WidgetKind {
             WidgetKind::TabBar => "Tab Bar",
             WidgetKind::Columns => "Columns",
             WidgetKind::Window => "Window",
+            WidgetKind::Container => "Container",
         }
     }
 
@@ -241,6 +244,7 @@ impl WidgetKind {
                 | WidgetKind::TabBar
                 | WidgetKind::Window
                 | WidgetKind::CollapsingHeader
+                | WidgetKind::Container
         )
     }
 
@@ -288,6 +292,7 @@ impl WidgetKind {
             WidgetKind::Columns,
             WidgetKind::TabBar,
             WidgetKind::Window,
+            WidgetKind::Container,
             WidgetKind::CollapsingHeader,
             WidgetKind::MenuButton,
             WidgetKind::Tree,
@@ -334,6 +339,7 @@ impl WidgetKind {
             WidgetKind::TabBar => vec2(300.0, 32.0),
             WidgetKind::Columns => vec2(300.0, 120.0),
             WidgetKind::Window => vec2(280.0, 180.0),
+            WidgetKind::Container => vec2(200.0, 150.0),
         }
     }
 
@@ -523,6 +529,14 @@ impl WidgetKind {
             },
             WidgetKind::Window => WidgetProps {
                 text: "Window Title".into(),
+                ..Default::default()
+            },
+            WidgetKind::Container => WidgetProps {
+                text: String::new(),
+                layout_mode: LayoutMode::Column,
+                layout_gap: 8.0,
+                layout_padding: [0.0; 4],
+                auto_size_y: false,
                 ..Default::default()
             },
         }
@@ -738,6 +752,35 @@ pub(crate) struct WidgetProps {
     /// When `false`, the tab bar header is hidden, acting as a clean ViewStack / Screen Switcher.
     #[serde(default = "widget_prop_default_true")]
     pub(crate) show_tabs: bool,
+
+    // ── Visual Appearance & Styling (Figma-grade) ──────────────────────────
+    /// Custom background fill color [R, G, B, A].
+    #[serde(default)]
+    pub(crate) bg_color: Option<[u8; 4]>,
+
+    /// Custom text / foreground color [R, G, B, A].
+    #[serde(default)]
+    pub(crate) text_color: Option<[u8; 4]>,
+
+    /// Custom font size in logical points.
+    #[serde(default)]
+    pub(crate) font_size: Option<f32>,
+
+    /// Bold text styling.
+    #[serde(default)]
+    pub(crate) font_bold: bool,
+
+    /// Custom border stroke color [R, G, B, A].
+    #[serde(default)]
+    pub(crate) border_color: Option<[u8; 4]>,
+
+    /// Custom border stroke width in px.
+    #[serde(default)]
+    pub(crate) border_width: Option<f32>,
+
+    /// Custom corner radius in px.
+    #[serde(default)]
+    pub(crate) corner_radius: Option<f32>,
 }
 
 fn widget_prop_default_true() -> bool {
@@ -790,6 +833,13 @@ impl Default for WidgetProps {
             responsive_vis: ResponsiveVisibility::Always,
             responsive_layout: ResponsiveLayout::None,
             show_tabs: true,
+            bg_color: None,
+            text_color: None,
+            font_size: None,
+            font_bold: false,
+            border_color: None,
+            border_width: None,
+            corner_radius: None,
         }
     }
 }
@@ -1483,5 +1533,42 @@ mod tests {
             ResponsiveLayout::RowToColumnOnPortrait.resolve_mode(LayoutMode::Row, landscape),
             LayoutMode::Row
         );
+    }
+
+    #[test]
+    fn test_container_widget_kind() {
+        let kind = WidgetKind::Container;
+        assert_eq!(kind.category(), WidgetCategory::Containers);
+        assert!(kind.is_container());
+        assert_eq!(kind.display_name(), "Container");
+        assert_eq!(kind.default_size(), egui::vec2(200.0, 150.0));
+        let props = kind.default_props();
+        assert_eq!(props.layout_mode, LayoutMode::Column);
+        assert_eq!(props.layout_gap, 8.0);
+        assert!(!props.auto_size_y);
+    }
+
+    #[test]
+    fn test_visual_styling_props_serde_round_trip() {
+        let props = WidgetProps {
+            bg_color: Some([24, 28, 36, 255]),
+            text_color: Some([240, 240, 255, 255]),
+            font_size: Some(18.0),
+            font_bold: true,
+            border_color: Some([70, 80, 100, 255]),
+            border_width: Some(2.0),
+            corner_radius: Some(8.0),
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&props).unwrap();
+        let deserialized: WidgetProps = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.bg_color, Some([24, 28, 36, 255]));
+        assert_eq!(deserialized.text_color, Some([240, 240, 255, 255]));
+        assert_eq!(deserialized.font_size, Some(18.0));
+        assert!(deserialized.font_bold);
+        assert_eq!(deserialized.border_color, Some([70, 80, 100, 255]));
+        assert_eq!(deserialized.border_width, Some(2.0));
+        assert_eq!(deserialized.corner_radius, Some(8.0));
     }
 }

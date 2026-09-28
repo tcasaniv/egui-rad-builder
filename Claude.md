@@ -4,9 +4,9 @@
 
 **egui-rad-builder** is a Rapid Application Development (RAD) GUI builder tool for the egui immediate-mode GUI framework. It allows developers to visually design user interfaces through drag-and-drop, then generates production-ready Rust code for egui-based applications.
 
-**Current Version:** 0.1.10
+**Current Version:** 0.3.0
 **License:** MIT
-**Status:** Active early development
+**Status:** Active development (Undo/Redo, Layers, Layouts, Responsive, Zoom, Examples, ViewStack, Container, Styling)
 
 ---
 

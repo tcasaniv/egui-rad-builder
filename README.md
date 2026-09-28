@@ -2,7 +2,7 @@
 
 `egui-rad-builder` is an early-stage RAD GUI builder for Rust [`egui`](https://github.com/emilk/egui) applications. It provides a visual drag-and-drop canvas, widget inspector, JSON project save/load, and Rust code generation for `eframe`/`egui` apps.
 
-Current crate version: `0.2.1`
+Current crate version: `0.3.0`
 
 The generated UIs are intended to compile and run, but the project is still under active development. Expect rough edges in layout fidelity, widget nesting, and generated-code ergonomics.
 
@@ -13,11 +13,23 @@ The generated UIs are intended to compile and run, but the project is still unde
 Implemented:
 
 - Drag-and-drop widget palette with categorized widgets.
+- Clean `Container (Div)` widget for layout grouping without etched borders or forced titles.
+- Device viewport canvas with mobile, tablet, and desktop presets, screen rotation, and inner scroll.
+- Screen docking panels: Top (AppBar), Bottom (BottomNav), Left (NavRail/Sidebar), Right, and Center.
+- Responsive breakpoints and adaptive layouts (Portrait vs Landscape, Mobile vs Desktop).
+- Multi-view container (ViewStack) for screen-to-screen navigation with back buttons and external tabs.
+- Full Undo / Redo stack with keyboard shortcuts (Ctrl+Z / Ctrl+Y).
+- Hierarchy & Layer tree with reordering, visibility toggling, and multi-selection.
+- Context menu, drag-and-drop widget reparenting, and depth/z-order controls.
+- Container auto-layout modes: Free, Row, Column, WrapRow, and Grid with gap, padding, justify, and align.
+- Figma-grade visual appearance styling: background fills, text colors, font sizes, bold styling, border strokes, and corner radiuses.
+- Smooth canvas zoom (Ctrl+Scroll, %, Fit-to-Screen).
+- Built-in example projects (File -> Examples) showcasing mobile navigation, hamburger side drawers, and responsive screens.
 - Central canvas plus optional top, bottom, left, and right panel areas.
 - Inspector for widget text, sizing, position, values, colors, item lists, URLs, tooltips, enabled state, and widget-specific options.
 - Multi-select, copy/paste, duplicate, delete, select all, alignment, distribution, and match-size actions.
 - Configurable grid display and grid snapping.
-- Edit and preview modes. Preview mode hides selection handles and lets widgets behave more like the generated app.
+- Edit and preview modes. Preview mode hides selection handles and lets widgets behave interactively.
 - Project save/load through native file dialogs using JSON-based `.json` or `.rad` files.
 - JSON export/import through the generated output panel.
 - Rust code generation with single-file, separate-file, and UI-function-only output modes.
@@ -29,7 +41,7 @@ Supported widget types include:
 - Basic: Label, Button, Image + Text Button, Checkbox, Link, Hyperlink, Selectable Label, Separator
 - Text/display: Heading, Small, Monospace, Progress Bar, Spinner, Image, Placeholder
 - Input: TextEdit, Text Area, Password, Slider, Drag Value, Combo Box, Radio Group, Date Picker, Angle Selector, Color Picker
-- Containers/layout: Group, Scroll Box, Columns, Tab Bar, Window, Collapsing Header
+- Containers/layout: Container (Div), Group, Scroll Box, Columns, Tab Bar (ViewStack), Window, Collapsing Header
 - Advanced: Menu Button, Tree, Code Editor
 
 ## Build
@@ -56,7 +68,7 @@ cargo run
 cargo test
 ```
 
-Current local result: `20 passed; 0 failed`.
+Current local result: `72 passed; 0 failed`.
 
 ## Basic Workflow
 
