@@ -8,8 +8,8 @@ use egui::{pos2, vec2};
 use crate::{
     project::{Project, ScreenPreset},
     widget::{
-        ActionEffect, ActionTrigger, DockArea, LayoutMode, ResponsiveLayout, SizePolicy, Widget,
-        WidgetAction, WidgetId, WidgetKind,
+        ActionEffect, ActionTrigger, DockArea, LayoutMode, ResponsiveLayout, ResponsiveVisibility,
+        SizePolicy, Widget, WidgetAction, WidgetId, WidgetKind,
     },
 };
 
@@ -49,14 +49,10 @@ fn action(trigger: ActionTrigger, effect: ActionEffect) -> WidgetAction {
 
 // ── 01 – Mobile Navigation & Multi-View ───────────────────────────────────────
 
-/// Classic mobile app: top bar + ViewStack (3 views) + bottom navigation bar.
-///
-/// Views:
-///   0 – Home/Feed with a "See Details" button
-///   1 – Detail view with a "Back" button
-///   2 – Profile / Settings
-///
-/// Bottom bar buttons switch between views via SwitchTab.
+/// Classic mobile app with responsive adaptive navigation:
+/// - In Portrait (vertical 390x844): Bottom navigation bar in Row layout.
+/// - In Landscape (horizontal 844x390): Left navigation rail in Column layout.
+/// - Multi-view container (TabBar as ViewStack) with Home, Detail, and Profile screens.
 pub(crate) fn mobile_navigation_example() -> Project {
     let mut project = Project {
         screen_preset: ScreenPreset::MobilePortrait,
@@ -64,42 +60,64 @@ pub(crate) fn mobile_navigation_example() -> Project {
         root_layout_mode: LayoutMode::Column,
         root_layout_gap: 0.0,
         root_layout_padding: [0.0; 4],
+        root_responsive_layout: ResponsiveLayout::RowToColumnOnPortrait,
         ..Default::default()
     };
 
     // ── Root layout widgets ────────────────────────────────────────────────────
-    // 1) Top App Bar
-    let mut top_bar = w(1, WidgetKind::Group, pos2(0.0, 0.0), vec2(390.0, 56.0));
-    top_bar.props.text = "App Bar".into();
+    // 1) Left Navigation Rail (visible only in Landscape)
+    let mut left_rail = w(4, WidgetKind::Container, pos2(0.0, 0.0), vec2(80.0, 390.0));
+    left_rail.props.name = "LeftNavRail".into();
+    left_rail.area = DockArea::Left;
+    left_rail.props.responsive_vis = ResponsiveVisibility::LandscapeOnly;
+    left_rail.props.width_policy = SizePolicy::Fixed;
+    left_rail.props.height_policy = SizePolicy::Fill;
+    left_rail.props.layout_mode = LayoutMode::Column;
+    left_rail.props.layout_gap = 12.0;
+    left_rail.props.layout_padding = [16.0, 8.0, 16.0, 8.0];
+    left_rail.props.bg_color = Some([24, 24, 30, 255]);
+    left_rail.props.border_color = Some([45, 45, 60, 255]);
+    left_rail.props.border_width = Some(1.0);
+
+    // 2) Top App Bar (visible in both orientations)
+    let mut top_bar = w(1, WidgetKind::Container, pos2(0.0, 0.0), vec2(390.0, 56.0));
     top_bar.props.name = "TopBar".into();
+    top_bar.area = DockArea::Top;
     top_bar.props.horizontal = true;
     top_bar.props.layout_mode = LayoutMode::Row;
     top_bar.props.layout_gap = 8.0;
-    top_bar.props.layout_padding = [8.0, 16.0, 8.0, 16.0];
+    top_bar.props.layout_padding = [12.0, 16.0, 12.0, 16.0];
     top_bar.props.width_policy = SizePolicy::Fill;
     top_bar.props.height_policy = SizePolicy::Fixed;
+    top_bar.props.bg_color = Some([28, 28, 36, 255]);
 
-    // 2) View Container (TabBar used as ViewStack — no tab header)
+    // 3) View Container (TabBar as ViewStack — no tab buttons)
     let mut views = w(2, WidgetKind::TabBar, pos2(0.0, 56.0), vec2(390.0, 732.0));
     views.props.name = "Views".into();
+    views.area = DockArea::Center;
     views.props.show_tabs = false;
     views.props.items = vec!["Home".into(), "Detail".into(), "Profile".into()];
     views.props.selected = 0;
     views.props.width_policy = SizePolicy::Fill;
     views.props.height_policy = SizePolicy::Fill;
 
-    // 3) Bottom Navigation Bar
-    let mut bottom = w(3, WidgetKind::Group, pos2(0.0, 788.0), vec2(390.0, 56.0));
-    bottom.props.text = String::new();
+    // 4) Bottom Navigation Bar (visible only in Portrait)
+    let mut bottom = w(3, WidgetKind::Container, pos2(0.0, 788.0), vec2(390.0, 56.0));
     bottom.props.name = "BottomNav".into();
+    bottom.area = DockArea::Bottom;
+    bottom.props.responsive_vis = ResponsiveVisibility::PortraitOnly;
     bottom.props.horizontal = true;
     bottom.props.layout_mode = LayoutMode::Row;
     bottom.props.layout_gap = 0.0;
-    bottom.props.layout_padding = [4.0, 8.0, 4.0, 8.0];
-    bottom.props.layout_justify = crate::widget::Justify::Center;
+    bottom.props.layout_padding = [6.0, 8.0, 6.0, 8.0];
+    bottom.props.layout_justify = crate::widget::Justify::SpaceEvenly;
     bottom.props.width_policy = SizePolicy::Fill;
     bottom.props.height_policy = SizePolicy::Fixed;
+    bottom.props.bg_color = Some([24, 24, 30, 255]);
+    bottom.props.border_color = Some([45, 45, 60, 255]);
+    bottom.props.border_width = Some(1.0);
 
+    project.widgets.push(left_rail);
     project.widgets.push(top_bar);
     project.widgets.push(views);
     project.widgets.push(bottom);
@@ -112,8 +130,7 @@ pub(crate) fn mobile_navigation_example() -> Project {
     project.widgets.push(app_title);
 
     // ── View 0: Home ──────────────────────────────────────────────────────────
-    let mut home_group = child(20, WidgetKind::Group, pos2(0.0, 0.0), vec2(374.0, 700.0), 2);
-    home_group.props.text = String::new();
+    let mut home_group = child(20, WidgetKind::Container, pos2(0.0, 0.0), vec2(374.0, 700.0), 2);
     home_group.props.name = "HomeView".into();
     home_group.props.layout_mode = LayoutMode::Column;
     home_group.props.layout_gap = 16.0;
@@ -128,21 +145,39 @@ pub(crate) fn mobile_navigation_example() -> Project {
     home_title.props.width_policy = SizePolicy::Fill;
     project.widgets.push(home_title);
 
-    let mut card1 = child(22, WidgetKind::Placeholder, pos2(0.0, 0.0), vec2(358.0, 160.0), 20);
-    card1.props.text = "Featured Card".into();
-    card1.props.color = [60, 120, 200, 180];
+    let mut card1 = child(22, WidgetKind::Container, pos2(0.0, 0.0), vec2(358.0, 140.0), 20);
+    card1.props.name = "FeaturedCard".into();
+    card1.props.bg_color = Some([32, 60, 110, 255]);
+    card1.props.corner_radius = Some(8.0);
+    card1.props.layout_mode = LayoutMode::Column;
+    card1.props.layout_padding = [16.0, 16.0, 16.0, 16.0];
     card1.props.width_policy = SizePolicy::Fill;
     project.widgets.push(card1);
 
-    let mut card2 = child(23, WidgetKind::Placeholder, pos2(0.0, 0.0), vec2(358.0, 100.0), 20);
-    card2.props.text = "Article Item".into();
-    card2.props.color = [80, 80, 80, 120];
+    let mut card1_lbl = child(25, WidgetKind::Heading, pos2(0.0, 0.0), vec2(326.0, 28.0), 22);
+    card1_lbl.props.text = "Featured Content".into();
+    project.widgets.push(card1_lbl);
+
+    let mut card2 = child(23, WidgetKind::Container, pos2(0.0, 0.0), vec2(358.0, 80.0), 20);
+    card2.props.name = "ArticleCard".into();
+    card2.props.bg_color = Some([28, 28, 36, 255]);
+    card2.props.border_color = Some([50, 50, 65, 255]);
+    card2.props.border_width = Some(1.0);
+    card2.props.corner_radius = Some(6.0);
+    card2.props.layout_mode = LayoutMode::Column;
+    card2.props.layout_padding = [12.0, 12.0, 12.0, 12.0];
     card2.props.width_policy = SizePolicy::Fill;
     project.widgets.push(card2);
+
+    let mut card2_lbl = child(26, WidgetKind::Label, pos2(0.0, 0.0), vec2(334.0, 24.0), 23);
+    card2_lbl.props.text = "Article Item (tap See Details below)".into();
+    project.widgets.push(card2_lbl);
 
     // Button: go to Detail view
     let mut see_details = child(24, WidgetKind::Button, pos2(0.0, 0.0), vec2(160.0, 40.0), 20);
     see_details.props.text = "See Details".into();
+    see_details.props.bg_color = Some([40, 90, 180, 255]);
+    see_details.props.corner_radius = Some(6.0);
     see_details.props.actions = vec![action(
         ActionTrigger::OnClick,
         ActionEffect::SwitchTab { target: WidgetId::new(2), tab_index: 1 },
@@ -150,8 +185,7 @@ pub(crate) fn mobile_navigation_example() -> Project {
     project.widgets.push(see_details);
 
     // ── View 1: Detail ────────────────────────────────────────────────────────
-    let mut detail_group = child(30, WidgetKind::Group, pos2(0.0, 0.0), vec2(374.0, 700.0), 2);
-    detail_group.props.text = String::new();
+    let mut detail_group = child(30, WidgetKind::Container, pos2(0.0, 0.0), vec2(374.0, 700.0), 2);
     detail_group.props.name = "DetailView".into();
     detail_group.props.layout_mode = LayoutMode::Column;
     detail_group.props.layout_gap = 16.0;
@@ -167,19 +201,21 @@ pub(crate) fn mobile_navigation_example() -> Project {
     project.widgets.push(detail_title);
 
     let mut detail_img = child(32, WidgetKind::Placeholder, pos2(0.0, 0.0), vec2(358.0, 200.0), 30);
-    detail_img.props.text = "Image / Hero".into();
+    detail_img.props.text = "Hero Image".into();
     detail_img.props.color = [40, 100, 180, 160];
     detail_img.props.width_policy = SizePolicy::Fill;
     project.widgets.push(detail_img);
 
     let mut detail_desc = child(33, WidgetKind::Label, pos2(0.0, 0.0), vec2(358.0, 64.0), 30);
-    detail_desc.props.text = "Full description of the item goes here. You can include as much text as needed.".into();
+    detail_desc.props.text = "Full item description goes here. Responsive navigation automatically adapts between portrait and landscape.".into();
     detail_desc.props.width_policy = SizePolicy::Fill;
     project.widgets.push(detail_desc);
 
     // Back button
     let mut back_btn = child(34, WidgetKind::Button, pos2(0.0, 0.0), vec2(160.0, 40.0), 30);
     back_btn.props.text = "Back to Home".into();
+    back_btn.props.bg_color = Some([50, 50, 65, 255]);
+    back_btn.props.corner_radius = Some(6.0);
     back_btn.props.actions = vec![action(
         ActionTrigger::OnClick,
         ActionEffect::SwitchTab { target: WidgetId::new(2), tab_index: 0 },
@@ -187,8 +223,7 @@ pub(crate) fn mobile_navigation_example() -> Project {
     project.widgets.push(back_btn);
 
     // ── View 2: Profile ───────────────────────────────────────────────────────
-    let mut profile_group = child(40, WidgetKind::Group, pos2(0.0, 0.0), vec2(374.0, 700.0), 2);
-    profile_group.props.text = String::new();
+    let mut profile_group = child(40, WidgetKind::Container, pos2(0.0, 0.0), vec2(374.0, 700.0), 2);
     profile_group.props.name = "ProfileView".into();
     profile_group.props.layout_mode = LayoutMode::Column;
     profile_group.props.layout_gap = 12.0;
@@ -223,11 +258,23 @@ pub(crate) fn mobile_navigation_example() -> Project {
     notifs.props.checked = true;
     project.widgets.push(notifs);
 
-    // ── Bottom nav buttons ────────────────────────────────────────────────────
+    // ── Bottom nav buttons (in a Row for Portrait) ───────────────────────────
     for (id, label, tab_idx) in [(50u64, "Home", 0usize), (51, "Details", 1), (52, "Profile", 2)] {
         let mut btn = child(id, WidgetKind::Button, pos2(0.0, 0.0), vec2(110.0, 44.0), 3);
         btn.props.text = label.into();
         btn.props.height_policy = SizePolicy::Fill;
+        btn.props.width_policy = SizePolicy::Fill;
+        btn.props.actions = vec![action(
+            ActionTrigger::OnClick,
+            ActionEffect::SwitchTab { target: WidgetId::new(2), tab_index: tab_idx },
+        )];
+        project.widgets.push(btn);
+    }
+
+    // ── Left nav rail buttons (in a Column for Landscape) ─────────────────────
+    for (id, label, tab_idx) in [(60u64, "Home", 0usize), (61, "Details", 1), (62, "Profile", 2)] {
+        let mut btn = child(id, WidgetKind::Button, pos2(0.0, 0.0), vec2(64.0, 44.0), 4);
+        btn.props.text = label.into();
         btn.props.width_policy = SizePolicy::Fill;
         btn.props.actions = vec![action(
             ActionTrigger::OnClick,
@@ -252,13 +299,13 @@ pub(crate) fn hamburger_drawer_example() -> Project {
     };
 
     // ── Header bar ────────────────────────────────────────────────────────────
-    let mut header = w(1, WidgetKind::Group, pos2(0.0, 0.0), vec2(390.0, 56.0));
-    header.props.text = String::new();
+    let mut header = w(1, WidgetKind::Container, pos2(0.0, 0.0), vec2(390.0, 56.0));
     header.props.name = "Header".into();
     header.props.horizontal = true;
     header.props.layout_mode = LayoutMode::Row;
     header.props.layout_gap = 8.0;
     header.props.layout_padding = [8.0, 16.0, 8.0, 8.0];
+    header.props.bg_color = Some([28, 28, 36, 255]);
     project.widgets.push(header);
 
     // Hamburger button
@@ -277,8 +324,7 @@ pub(crate) fn hamburger_drawer_example() -> Project {
     project.widgets.push(title);
 
     // ── Main content area ─────────────────────────────────────────────────────
-    let mut content = w(2, WidgetKind::Group, pos2(0.0, 56.0), vec2(390.0, 788.0));
-    content.props.text = String::new();
+    let mut content = w(2, WidgetKind::Container, pos2(0.0, 56.0), vec2(390.0, 788.0));
     content.props.name = "MainContent".into();
     content.props.layout_mode = LayoutMode::Column;
     content.props.layout_gap = 16.0;
@@ -301,13 +347,16 @@ pub(crate) fn hamburger_drawer_example() -> Project {
     desc.props.width_policy = SizePolicy::Fill;
     project.widgets.push(desc);
 
-    // ── Drawer (initially hidden) ─────────────────────────────────────────────
-    let mut drawer = w(3, WidgetKind::Group, pos2(0.0, 0.0), vec2(280.0, 844.0));
-    drawer.props.text = String::new();
+    // ── Drawer (initially hidden, full screen height, solid surface) ───────────
+    let mut drawer = w(3, WidgetKind::Container, pos2(0.0, 0.0), vec2(280.0, 844.0));
     drawer.props.name = "SideDrawer".into();
     drawer.props.layout_mode = LayoutMode::Column;
     drawer.props.layout_gap = 8.0;
     drawer.props.layout_padding = [16.0, 16.0, 16.0, 16.0];
+    drawer.props.auto_size_y = false;
+    drawer.props.bg_color = Some([24, 24, 30, 255]);
+    drawer.props.border_color = Some([50, 50, 65, 255]);
+    drawer.props.border_width = Some(1.5);
     drawer.props.initially_visible = false;
     project.widgets.push(drawer);
 

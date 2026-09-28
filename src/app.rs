@@ -1817,6 +1817,7 @@ impl RadBuilderApp {
             WidgetKind::TabBar => if show_tabs { vec2(6.0, 28.0) } else { vec2(6.0, 6.0) },
             WidgetKind::CollapsingHeader => vec2(8.0, 24.0),
             WidgetKind::Columns => vec2(6.0, 6.0),
+            WidgetKind::Container => vec2(0.0, 0.0),
             _ => vec2(6.0, 6.0),
         }
     }
@@ -2080,13 +2081,13 @@ impl RadBuilderApp {
                     if self.show_grid {
                         self.draw_grid(ui, panel_rect, self.grid_size);
                     }
-                    for wid in top_ids {
+                    for wid in &top_ids {
                         Self::draw_widget_tree(
                             ui,
                             panel_rect,
                             self.grid_size,
                             &mut self.selected,
-                            wid,
+                            *wid,
                             &mut self.project.widgets,
                             &mut triggered_actions,
                             false,
@@ -2106,13 +2107,13 @@ impl RadBuilderApp {
                     if self.show_grid {
                         self.draw_grid(ui, panel_rect, self.grid_size);
                     }
-                    for wid in bottom_ids {
+                    for wid in &bottom_ids {
                         Self::draw_widget_tree(
                             ui,
                             panel_rect,
                             self.grid_size,
                             &mut self.selected,
-                            wid,
+                            *wid,
                             &mut self.project.widgets,
                             &mut triggered_actions,
                             false,
@@ -2132,13 +2133,13 @@ impl RadBuilderApp {
                     if self.show_grid {
                         self.draw_grid(ui, panel_rect, self.grid_size);
                     }
-                    for wid in left_ids {
+                    for wid in &left_ids {
                         Self::draw_widget_tree(
                             ui,
                             panel_rect,
                             self.grid_size,
                             &mut self.selected,
-                            wid,
+                            *wid,
                             &mut self.project.widgets,
                             &mut triggered_actions,
                             false,
@@ -2158,13 +2159,13 @@ impl RadBuilderApp {
                     if self.show_grid {
                         self.draw_grid(ui, panel_rect, self.grid_size);
                     }
-                    for wid in right_ids {
+                    for wid in &right_ids {
                         Self::draw_widget_tree(
                             ui,
                             panel_rect,
                             self.grid_size,
                             &mut self.selected,
-                            wid,
+                            *wid,
                             &mut self.project.widgets,
                             &mut triggered_actions,
                             false,
@@ -2183,16 +2184,36 @@ impl RadBuilderApp {
 
         let mut root_ids = center_ids;
         root_ids.extend(free_ids);
+        root_ids.extend(top_ids);
+        root_ids.extend(bottom_ids);
+        root_ids.extend(left_ids);
+        root_ids.extend(right_ids);
+
+        let is_portrait = viewport_size.y > viewport_size.x;
 
         if effective_root_mode != LayoutMode::Free {
             let children_info: Vec<(WidgetId, egui::Vec2, SizePolicy, SizePolicy, Option<Align>)> = root_ids
                 .iter()
                 .filter_map(|&cid| {
-                    self.project.widgets.iter().find(|x| x.id == cid && x.props.active).map(|cw| {
-                        (cw.id, cw.size, cw.props.width_policy, cw.props.height_policy, cw.props.align_self)
+                    self.project.widgets.iter().find(|x| x.id == cid && x.props.active).and_then(|cw| {
+                        let vis = match cw.props.responsive_vis {
+                            ResponsiveVisibility::Always => true,
+                            ResponsiveVisibility::PortraitOnly => is_portrait,
+                            ResponsiveVisibility::LandscapeOnly => !is_portrait,
+                            ResponsiveVisibility::MobileOnly => viewport_size.x < 768.0,
+                            ResponsiveVisibility::DesktopOnly => viewport_size.x >= 768.0,
+                        };
+                        if vis {
+                            Some((cw.id, cw.size, cw.props.width_policy, cw.props.height_policy, cw.props.align_self))
+                        } else {
+                            None
+                        }
                     })
                 })
                 .collect();
+
+            let has_fill_height = children_info.iter().any(|(_, _, _, h_pol, _)| *h_pol == SizePolicy::Fill);
+            let hug_height = !has_fill_height;
 
             let layout_rects = Self::compute_auto_layout(
                 viewport_size,
@@ -2203,13 +2224,38 @@ impl RadBuilderApp {
                 self.project.root_layout_justify,
                 self.project.root_layout_padding,
                 &children_info,
-                true, // hug_height: true so column flows naturally downwards
+                hug_height,
             );
 
             for (cid, rel_rect) in layout_rects {
                 if let Some(cw) = self.project.widgets.iter_mut().find(|x| x.id == cid) {
                     cw.pos = rel_rect.min;
                     cw.size = rel_rect.size().max(egui::Vec2::splat(1.0));
+                }
+            }
+        } else {
+            // Free mode: support screen docking for root widgets
+            for wid in &root_ids {
+                if let Some(cw) = self.project.widgets.iter_mut().find(|x| x.id == *wid) {
+                    match cw.area {
+                        DockArea::Top => {
+                            cw.pos = pos2(0.0, 0.0);
+                            cw.size.x = viewport_size.x;
+                        }
+                        DockArea::Bottom => {
+                            cw.pos = pos2(0.0, (viewport_size.y - cw.size.y).max(0.0));
+                            cw.size.x = viewport_size.x;
+                        }
+                        DockArea::Left => {
+                            cw.pos = pos2(0.0, 0.0);
+                            cw.size.y = viewport_size.y;
+                        }
+                        DockArea::Right => {
+                            cw.pos = pos2((viewport_size.x - cw.size.x).max(0.0), 0.0);
+                            cw.size.y = viewport_size.y;
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -2342,6 +2388,18 @@ impl RadBuilderApp {
                             }
 
                             for wid in &root_ids {
+                                if let Some(w) = self.project.widgets.iter().find(|x| x.id == *wid) {
+                                    let vis = match w.props.responsive_vis {
+                                        ResponsiveVisibility::Always => true,
+                                        ResponsiveVisibility::PortraitOnly => is_portrait,
+                                        ResponsiveVisibility::LandscapeOnly => !is_portrait,
+                                        ResponsiveVisibility::MobileOnly => viewport_size.x < 768.0,
+                                        ResponsiveVisibility::DesktopOnly => viewport_size.x >= 768.0,
+                                    };
+                                    if !vis {
+                                        continue;
+                                    }
+                                }
                                 Self::draw_widget_tree(
                                     ui,
                                     painter_rect,
@@ -2907,10 +2965,14 @@ impl RadBuilderApp {
 
             let widget_rect = Rect::from_min_size(container_rect.min + (w.pos * zoom).to_vec2(), w.size * zoom);
             let offset = Self::container_content_offset(w.kind, &w.props.text, w.props.show_tabs) * zoom;
-            let inner_rect = Rect::from_min_size(
-                widget_rect.min + offset,
-                (widget_rect.size() - offset - vec2(6.0 * zoom, 6.0 * zoom)).max(vec2(10.0 * zoom, 10.0 * zoom)),
-            );
+            let inner_rect = if w.kind == WidgetKind::Container {
+                widget_rect
+            } else {
+                Rect::from_min_size(
+                    widget_rect.min + offset,
+                    (widget_rect.size() - offset - vec2(6.0 * zoom, 6.0 * zoom)).max(vec2(10.0 * zoom, 10.0 * zoom)),
+                )
+            };
 
             // Filter children: active, matching parent, and matching TabBar tab if applicable
             let parent_tab_selected = w.props.selected;
@@ -3048,21 +3110,71 @@ impl RadBuilderApp {
                         w.props.selected = sel;
                     }
                     WidgetKind::Label => {
+                        let mut rt = egui::RichText::new(&w.props.text);
+                        if let Some(tc) = w.props.text_color {
+                            rt = rt.color(Color32::from_rgba_unmultiplied(tc[0], tc[1], tc[2], tc[3]));
+                        }
+                        if let Some(sz) = w.props.font_size {
+                            rt = rt.size(sz * zoom);
+                        }
+                        if w.props.font_bold {
+                            rt = rt.strong();
+                        }
                         ui.vertical_centered(|ui| {
-                            ui.label(&w.props.text);
+                            ui.label(rt);
                         });
                     }
                     WidgetKind::Button => {
-                        let resp = ui.add_sized(scaled_size, egui::Button::new(&w.props.text));
+                        let mut rt = egui::RichText::new(&w.props.text);
+                        if let Some(tc) = w.props.text_color {
+                            rt = rt.color(Color32::from_rgba_unmultiplied(tc[0], tc[1], tc[2], tc[3]));
+                        }
+                        if let Some(sz) = w.props.font_size {
+                            rt = rt.size(sz * zoom);
+                        }
+                        if w.props.font_bold {
+                            rt = rt.strong();
+                        }
+                        let mut btn = egui::Button::new(rt);
+                        if let Some(bg) = w.props.bg_color {
+                            btn = btn.fill(Color32::from_rgba_unmultiplied(bg[0], bg[1], bg[2], bg[3]));
+                        }
+                        if let Some(bc) = w.props.border_color {
+                            let bw = w.props.border_width.unwrap_or(1.0) * zoom;
+                            btn = btn.stroke(Stroke::new(bw, Color32::from_rgba_unmultiplied(bc[0], bc[1], bc[2], bc[3])));
+                        }
+                        if let Some(cr) = w.props.corner_radius {
+                            btn = btn.corner_radius((cr * zoom).max(0.0) as u8);
+                        }
+                        let resp = ui.add_sized(scaled_size, btn);
                         if !is_edit_mode {
                             Self::check_widget_actions(&resp, &w.props.actions, triggered);
                         }
                     }
                     WidgetKind::ImageTextButton => {
-                        // We keep it simple: icon + text as the button label.
-                        // Users can change `icon` to any emoji / short string.
                         let label = format!("{}  {}", w.props.icon, w.props.text);
-                        let resp = ui.add_sized(scaled_size, egui::Button::new(label));
+                        let mut rt = egui::RichText::new(label);
+                        if let Some(tc) = w.props.text_color {
+                            rt = rt.color(Color32::from_rgba_unmultiplied(tc[0], tc[1], tc[2], tc[3]));
+                        }
+                        if let Some(sz) = w.props.font_size {
+                            rt = rt.size(sz * zoom);
+                        }
+                        if w.props.font_bold {
+                            rt = rt.strong();
+                        }
+                        let mut btn = egui::Button::new(rt);
+                        if let Some(bg) = w.props.bg_color {
+                            btn = btn.fill(Color32::from_rgba_unmultiplied(bg[0], bg[1], bg[2], bg[3]));
+                        }
+                        if let Some(bc) = w.props.border_color {
+                            let bw = w.props.border_width.unwrap_or(1.0) * zoom;
+                            btn = btn.stroke(Stroke::new(bw, Color32::from_rgba_unmultiplied(bc[0], bc[1], bc[2], bc[3])));
+                        }
+                        if let Some(cr) = w.props.corner_radius {
+                            btn = btn.corner_radius((cr * zoom).max(0.0) as u8);
+                        }
+                        let resp = ui.add_sized(scaled_size, btn);
                         if !is_edit_mode {
                             Self::check_widget_actions(&resp, &w.props.actions, triggered);
                         }
@@ -3337,10 +3449,34 @@ impl RadBuilderApp {
                         w.props.text = buf;
                     }
                     WidgetKind::Heading => {
-                        ui.heading(&w.props.text);
+                        let mut rt = egui::RichText::new(&w.props.text);
+                        if let Some(tc) = w.props.text_color {
+                            rt = rt.color(Color32::from_rgba_unmultiplied(tc[0], tc[1], tc[2], tc[3]));
+                        }
+                        if let Some(sz) = w.props.font_size {
+                            rt = rt.size(sz * zoom);
+                        } else {
+                            rt = rt.heading();
+                        }
+                        if w.props.font_bold {
+                            rt = rt.strong();
+                        }
+                        ui.label(rt);
                     }
                     WidgetKind::Small => {
-                        ui.small(&w.props.text);
+                        let mut rt = egui::RichText::new(&w.props.text);
+                        if let Some(tc) = w.props.text_color {
+                            rt = rt.color(Color32::from_rgba_unmultiplied(tc[0], tc[1], tc[2], tc[3]));
+                        }
+                        if let Some(sz) = w.props.font_size {
+                            rt = rt.size(sz * zoom);
+                        } else {
+                            rt = rt.small();
+                        }
+                        if w.props.font_bold {
+                            rt = rt.strong();
+                        }
+                        ui.label(rt);
                     }
                     WidgetKind::Monospace => {
                         ui.monospace(&w.props.text);
@@ -3380,7 +3516,18 @@ impl RadBuilderApp {
                             });
                     }
                     WidgetKind::Group => {
-                        egui::Frame::group(ui.style()).show(ui, |ui| {
+                        let mut frame = egui::Frame::group(ui.style());
+                        if let Some(bg) = w.props.bg_color {
+                            frame = frame.fill(Color32::from_rgba_unmultiplied(bg[0], bg[1], bg[2], bg[3]));
+                        }
+                        if let Some(bc) = w.props.border_color {
+                            let bw = w.props.border_width.unwrap_or(1.0) * zoom;
+                            frame = frame.stroke(Stroke::new(bw, Color32::from_rgba_unmultiplied(bc[0], bc[1], bc[2], bc[3])));
+                        }
+                        if let Some(cr) = w.props.corner_radius {
+                            frame = frame.corner_radius((cr * zoom).max(0.0) as u8);
+                        }
+                        frame.show(ui, |ui| {
                             ui.set_min_size((scaled_size - vec2(12.0 * zoom, 12.0 * zoom)).max(egui::Vec2::ZERO));
                             let add_contents = |ui: &mut egui::Ui| {
                                 if !w.props.text.is_empty() {
@@ -3395,6 +3542,25 @@ impl RadBuilderApp {
                                 ui.horizontal(add_contents);
                             } else {
                                 ui.vertical(add_contents);
+                            }
+                        });
+                    }
+                    WidgetKind::Container => {
+                        let mut frame = egui::Frame::NONE;
+                        if let Some(bg) = w.props.bg_color {
+                            frame = frame.fill(Color32::from_rgba_unmultiplied(bg[0], bg[1], bg[2], bg[3]));
+                        }
+                        if let Some(bc) = w.props.border_color {
+                            let bw = w.props.border_width.unwrap_or(1.0) * zoom;
+                            frame = frame.stroke(Stroke::new(bw, Color32::from_rgba_unmultiplied(bc[0], bc[1], bc[2], bc[3])));
+                        }
+                        if let Some(cr) = w.props.corner_radius {
+                            frame = frame.corner_radius((cr * zoom).max(0.0) as u8);
+                        }
+                        frame.show(ui, |ui| {
+                            ui.set_min_size(scaled_size);
+                            if !has_children && is_edit_mode {
+                                ui.weak("(container)");
                             }
                         });
                     }
@@ -3676,6 +3842,7 @@ impl RadBuilderApp {
                         .id_salt("palette_containers")
                         .default_open(true)
                         .show(ui, |ui| {
+                            self.palette_item(ui, "Container (Div)", WidgetKind::Container);
                             self.palette_item(ui, "Group", WidgetKind::Group);
                             self.palette_item(ui, "Scroll Box", WidgetKind::ScrollBox);
                             self.palette_item(ui, "Columns", WidgetKind::Columns);
@@ -4438,7 +4605,8 @@ impl RadBuilderApp {
                     | WidgetKind::Tree
                     | WidgetKind::Separator
                     | WidgetKind::Spinner
-                    | WidgetKind::TabBar => {}
+                    | WidgetKind::TabBar
+                    | WidgetKind::Container => {}
                     WidgetKind::MenuButton => {
                         ui.label("Text");
                         ui.add(
@@ -4911,6 +5079,86 @@ impl RadBuilderApp {
                                 ui.selectable_value(&mut w.props.responsive_vis, *rv, rv.display_name());
                             }
                         });
+                });
+
+                ui.separator();
+                ui.collapsing(egui::RichText::new("🎨 Appearance & Style").strong(), |ui| {
+                    // Background Color
+                    ui.horizontal(|ui| {
+                        let mut has_bg = w.props.bg_color.is_some();
+                        if ui.checkbox(&mut has_bg, "Background").changed() {
+                            w.props.bg_color = if has_bg { Some([35, 35, 45, 255]) } else { None };
+                        }
+                        if let Some(ref mut c) = w.props.bg_color {
+                            let mut color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                            if egui::color_picker::color_edit_button_srgba(ui, &mut color, egui::color_picker::Alpha::OnlyBlend).changed() {
+                                *c = [color.r(), color.g(), color.b(), color.a()];
+                            }
+                        }
+                    });
+
+                    // Text / Foreground Color
+                    ui.horizontal(|ui| {
+                        let mut has_tc = w.props.text_color.is_some();
+                        if ui.checkbox(&mut has_tc, "Text Color").changed() {
+                            w.props.text_color = if has_tc { Some([255, 255, 255, 255]) } else { None };
+                        }
+                        if let Some(ref mut c) = w.props.text_color {
+                            let mut color = Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]);
+                            if egui::color_picker::color_edit_button_srgba(ui, &mut color, egui::color_picker::Alpha::OnlyBlend).changed() {
+                                *c = [color.r(), color.g(), color.b(), color.a()];
+                            }
+                        }
+                    });
+
+                    // Typography: Font Size & Bold
+                    ui.horizontal(|ui| {
+                        let mut has_fs = w.props.font_size.is_some();
+                        if ui.checkbox(&mut has_fs, "Font Size").changed() {
+                            w.props.font_size = if has_fs { Some(14.0) } else { None };
+                        }
+                        if let Some(ref mut sz) = w.props.font_size {
+                            ui.add(egui::DragValue::new(sz).range(8.0..=72.0).suffix(" pt"));
+                        }
+                        ui.checkbox(&mut w.props.font_bold, "Bold");
+                    });
+
+                    // Border / Stroke
+                    ui.horizontal(|ui| {
+                        let mut has_border = w.props.border_color.is_some();
+                        if ui.checkbox(&mut has_border, "Border").changed() {
+                            if has_border {
+                                w.props.border_color = Some([80, 80, 100, 255]);
+                                if w.props.border_width.is_none() {
+                                    w.props.border_width = Some(1.0);
+                                }
+                            } else {
+                                w.props.border_color = None;
+                                w.props.border_width = None;
+                            }
+                        }
+                        if let Some(ref mut bc) = w.props.border_color {
+                            let mut color = Color32::from_rgba_unmultiplied(bc[0], bc[1], bc[2], bc[3]);
+                            if egui::color_picker::color_edit_button_srgba(ui, &mut color, egui::color_picker::Alpha::OnlyBlend).changed() {
+                                *bc = [color.r(), color.g(), color.b(), color.a()];
+                            }
+                            let mut bw = w.props.border_width.unwrap_or(1.0);
+                            if ui.add(egui::DragValue::new(&mut bw).range(0.5..=10.0).suffix(" px")).changed() {
+                                w.props.border_width = Some(bw);
+                            }
+                        }
+                    });
+
+                    // Corner Radius (Border Radius)
+                    ui.horizontal(|ui| {
+                        let mut has_cr = w.props.corner_radius.is_some();
+                        if ui.checkbox(&mut has_cr, "Corner Radius").changed() {
+                            w.props.corner_radius = if has_cr { Some(4.0) } else { None };
+                        }
+                        if let Some(ref mut cr) = w.props.corner_radius {
+                            ui.add(egui::DragValue::new(cr).range(0.0..=50.0).suffix(" px"));
+                        }
+                    });
                 });
 
                 ui.separator();
@@ -6801,17 +7049,22 @@ impl RadBuilderApp {
                         text = escape(&w.props.text),
                     ));
                 }
-                WidgetKind::Group => {
-                    let title_code = if w.props.text.is_empty() {
+                WidgetKind::Group | WidgetKind::Container => {
+                    let title_code = if w.kind == WidgetKind::Container || w.props.text.is_empty() {
                         String::new()
                     } else {
                         format!("ui.strong(\"{}\"); ui.separator(); ", escape(&w.props.text))
+                    };
+                    let frame_str = if w.kind == WidgetKind::Container {
+                        "egui::Frame::NONE"
+                    } else {
+                        "egui::Frame::group(ui.style())"
                     };
                     let layout_fn = if w.props.horizontal { "horizontal" } else { "vertical" };
                     out.push_str(&format!(
                         "    ui.scope_builder(egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(\
                             {origin} + egui::vec2({x:.1},{y:.1}), egui::vec2({w:.1},{h:.1}))), |ui| {{\n\
-                            egui::Frame::group(ui.style()).show(ui, |ui| {{\n\
+                            {frame}.show(ui, |ui| {{\n\
                                 ui.set_min_size(egui::vec2({iw:.1},{ih:.1}));\n\
                                 ui.{layout_fn}(|ui| {{\n\
                                     {title}\n",
@@ -6821,6 +7074,7 @@ impl RadBuilderApp {
                         h = size.y,
                         iw = (size.x - 12.0).max(10.0),
                         ih = (size.y - 12.0).max(10.0),
+                        frame = frame_str,
                         title = title_code,
                         layout_fn = layout_fn,
                     ));
