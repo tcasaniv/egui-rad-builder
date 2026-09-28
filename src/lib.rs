@@ -16,6 +16,7 @@ mod history;
 mod project;
 /// Widget metadata, defaults, and palette categorization.
 pub mod widget;
+mod examples;
 
 /// Returns the default design-canvas size used by new projects.
 pub fn default_canvas_size() -> egui::Vec2 {
