@@ -1802,7 +1802,7 @@ impl RadBuilderApp {
     }
 
     /// Returns the inner content offset for a container widget.
-    pub(crate) fn container_content_offset(kind: WidgetKind, props_text: &str) -> egui::Vec2 {
+    pub(crate) fn container_content_offset(kind: WidgetKind, props_text: &str, show_tabs: bool) -> egui::Vec2 {
         match kind {
             WidgetKind::Group => {
                 if !props_text.is_empty() {
@@ -1813,7 +1813,8 @@ impl RadBuilderApp {
             }
             WidgetKind::Window => vec2(8.0, 28.0),
             WidgetKind::ScrollBox => vec2(6.0, 6.0),
-            WidgetKind::TabBar => vec2(6.0, 28.0),
+            // When show_tabs=false (ViewContainer), no tab header → 6px padding only
+            WidgetKind::TabBar => if show_tabs { vec2(6.0, 28.0) } else { vec2(6.0, 6.0) },
             WidgetKind::CollapsingHeader => vec2(8.0, 24.0),
             WidgetKind::Columns => vec2(6.0, 6.0),
             _ => vec2(6.0, 6.0),
@@ -1834,7 +1835,7 @@ impl RadBuilderApp {
                     .widgets
                     .iter()
                     .find(|x| x.id == pid)
-                    .map(|pw| Self::container_content_offset(pw.kind, &pw.props.text))
+                    .map(|pw| Self::container_content_offset(pw.kind, &pw.props.text, pw.props.show_tabs))
                     .unwrap_or(egui::Vec2::ZERO);
                 parent_pos + offset + w.pos.to_vec2()
             }
@@ -1873,7 +1874,7 @@ impl RadBuilderApp {
                     .widgets
                     .iter()
                     .find(|x| x.id == pid)
-                    .map(|pw| Self::container_content_offset(pw.kind, &pw.props.text))
+                    .map(|pw| Self::container_content_offset(pw.kind, &pw.props.text, pw.props.show_tabs))
                     .unwrap_or(egui::Vec2::ZERO);
                 let content_origin = parent_abs + offset;
                 pos2(
@@ -1980,6 +1981,17 @@ impl RadBuilderApp {
             },
             Err(e) => self.set_status(format!("Load failed: {}", e)),
         }
+    }
+
+    /// Loads a built-in example project, resets IDs, clears history, and shows a status message.
+    fn load_example(&mut self, project: Project, name: &str) {
+        self.project = project;
+        self.normalize_project_widget_ids();
+        self.selected.clear();
+        self.history.clear();
+        self.current_file = None;
+        self.push_undo();
+        self.set_status(format!("Loaded example: {}", name));
     }
 
     /// Returns the host platform and architecture without emojis (e.g. "Windows x86_64")
@@ -2894,7 +2906,7 @@ impl RadBuilderApp {
             }
 
             let widget_rect = Rect::from_min_size(container_rect.min + (w.pos * zoom).to_vec2(), w.size * zoom);
-            let offset = Self::container_content_offset(w.kind, &w.props.text) * zoom;
+            let offset = Self::container_content_offset(w.kind, &w.props.text, w.props.show_tabs) * zoom;
             let inner_rect = Rect::from_min_size(
                 widget_rect.min + offset,
                 (widget_rect.size() - offset - vec2(6.0 * zoom, 6.0 * zoom)).max(vec2(10.0 * zoom, 10.0 * zoom)),
@@ -3406,18 +3418,36 @@ impl RadBuilderApp {
                             });
                     }
                     WidgetKind::TabBar => {
-                        ui.horizontal(|ui| {
-                            for (i, item) in w.props.items.iter().enumerate() {
-                                let selected = i == w.props.selected;
-                                let resp = ui.selectable_label(selected, item);
-                                if resp.clicked() {
-                                    w.props.selected = i;
+                        if w.props.show_tabs {
+                            ui.horizontal(|ui| {
+                                for (i, item) in w.props.items.iter().enumerate() {
+                                    let selected = i == w.props.selected;
+                                    let resp = ui.selectable_label(selected, item);
+                                    if resp.clicked() {
+                                        w.props.selected = i;
+                                    }
+                                    if !is_edit_mode {
+                                        Self::check_widget_actions(&resp, &w.props.actions, triggered);
+                                    }
                                 }
-                                if !is_edit_mode {
-                                    Self::check_widget_actions(&resp, &w.props.actions, triggered);
-                                }
+                            });
+                        } else {
+                            // View Container / Screen Switcher: no visible tab header.
+                            // In edit mode show a subtle picker so designer can switch active view.
+                            if is_edit_mode {
+                                let view_name = w.props.items.get(w.props.selected)
+                                    .map(|s| s.as_str())
+                                    .unwrap_or("View");
+                                ui.horizontal(|ui| {
+                                    ui.weak(format!("[View Container] Active: {}", view_name));
+                                    for (i, item) in w.props.items.iter().enumerate() {
+                                        if ui.selectable_label(i == w.props.selected, item).clicked() {
+                                            w.props.selected = i;
+                                        }
+                                    }
+                                });
                             }
-                        });
+                        }
                     }
                     WidgetKind::Columns => {
                         let cols = w.props.columns.max(1);
@@ -4476,11 +4506,20 @@ impl RadBuilderApp {
                     | WidgetKind::Tree
                     | WidgetKind::MenuButton
                     | WidgetKind::TabBar => {
-                        ui.label(match w.kind {
-                            WidgetKind::Tree => "Nodes (indent with spaces; 2 spaces per level)",
-                            WidgetKind::TabBar => "Tabs (one per line)",
-                            _ => "Items (one per line)",
-                        });
+                        // TabBar-specific: show_tabs toggle
+                        if w.kind == WidgetKind::TabBar {
+                            ui.separator();
+                            ui.checkbox(&mut w.props.show_tabs, "Show tab header buttons");
+                            if !w.props.show_tabs {
+                                ui.weak("Acting as View Container (tab buttons hidden; use SwitchTab actions to navigate)");
+                            }
+                            ui.label("Views / Tabs (one per line)");
+                        } else {
+                            ui.label(match w.kind {
+                                WidgetKind::Tree => "Nodes (indent with spaces; 2 spaces per level)",
+                                _ => "Items (one per line)",
+                            });
+                        }
                         let mut buf = w.props.items.join("\n");
                         if ui
                             .add(
@@ -4498,11 +4537,20 @@ impl RadBuilderApp {
                         }
                         if !matches!(w.kind, WidgetKind::Tree) && !w.props.items.is_empty() {
                             ui.horizontal(|ui| {
-                                ui.label("Selected index");
+                                ui.label(if w.kind == WidgetKind::TabBar && !w.props.show_tabs {
+                                    "Active view (edit mode)"
+                                } else {
+                                    "Selected index"
+                                });
                                 ui.add(
                                     egui::DragValue::new(&mut w.props.selected)
                                         .range(0..=w.props.items.len().saturating_sub(1)),
                                 );
+                                if w.kind == WidgetKind::TabBar && !w.props.items.is_empty() {
+                                    let label = w.props.items.get(w.props.selected)
+                                        .map(|s| s.as_str()).unwrap_or("");
+                                    ui.weak(format!("({})", label));
+                                }
                             });
                         }
                     }
@@ -5087,6 +5135,38 @@ impl RadBuilderApp {
                     self.set_status("New project created".into());
                     ui.close_kind(egui::UiKind::Menu);
                 }
+                ui.separator();
+                // Examples submenu (Arduino IDE style)
+                ui.menu_button("Examples", |ui| {
+                    if ui.button("01. Mobile Navigation & Multi-View").on_hover_text(
+                        "Mobile app: Top Bar + 3 views (Home/Detail/Profile) + Bottom Navigation with Back button"
+                    ).clicked() {
+                        let proj = crate::examples::mobile_navigation_example();
+                        self.load_example(proj, "Mobile Navigation & Multi-View");
+                        ui.close_kind(egui::UiKind::Menu);
+                    }
+                    if ui.button("02. Hamburger Drawer (Side Menu)").on_hover_text(
+                        "App with hamburger button that opens/closes a side navigation drawer"
+                    ).clicked() {
+                        let proj = crate::examples::hamburger_drawer_example();
+                        self.load_example(proj, "Hamburger Drawer (Side Menu)");
+                        ui.close_kind(egui::UiKind::Menu);
+                    }
+                    if ui.button("03. Adaptive Responsive Screen").on_hover_text(
+                        "Portrait/Landscape responsive layout: single column in portrait, 2-column side-by-side in landscape"
+                    ).clicked() {
+                        let proj = crate::examples::responsive_adaptive_example();
+                        self.load_example(proj, "Adaptive Responsive Screen");
+                        ui.close_kind(egui::UiKind::Menu);
+                    }
+                    if ui.button("04. Multi-Step Form Wizard").on_hover_text(
+                        "3-step wizard form with Next and Back navigation between steps"
+                    ).clicked() {
+                        let proj = crate::examples::multi_step_wizard_example();
+                        self.load_example(proj, "Multi-Step Form Wizard");
+                        ui.close_kind(egui::UiKind::Menu);
+                    }
+                });
                 ui.separator();
                 if ui
                     .button("Open...")

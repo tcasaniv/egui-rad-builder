@@ -733,6 +733,11 @@ pub(crate) struct WidgetProps {
     /// Adaptive layout rule for containers.
     #[serde(default)]
     pub(crate) responsive_layout: ResponsiveLayout,
+
+    /// Whether to render the visual tab header buttons for a TabBar container.
+    /// When `false`, the tab bar header is hidden, acting as a clean ViewStack / Screen Switcher.
+    #[serde(default = "widget_prop_default_true")]
+    pub(crate) show_tabs: bool,
 }
 
 fn widget_prop_default_true() -> bool {
@@ -784,6 +789,7 @@ impl Default for WidgetProps {
             expanded_height: None,
             responsive_vis: ResponsiveVisibility::Always,
             responsive_layout: ResponsiveLayout::None,
+            show_tabs: true,
         }
     }
 }
