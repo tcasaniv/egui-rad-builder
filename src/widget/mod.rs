@@ -587,6 +587,9 @@ pub(crate) enum ActionEffect {
     OpenModal(WidgetId),
     CloseModal(WidgetId),
     CustomRustCode(String),
+    TogglePanel(DockArea),
+    ShowPanel(DockArea),
+    HidePanel(DockArea),
 }
 
 #[allow(dead_code)]
@@ -601,6 +604,9 @@ impl ActionEffect {
             Self::OpenModal(_) => "Open Window/Modal",
             Self::CloseModal(_) => "Close Window/Modal",
             Self::CustomRustCode(_) => "Custom Rust Code",
+            Self::TogglePanel(_) => "Toggle Panel",
+            Self::ShowPanel(_) => "Show Panel",
+            Self::HidePanel(_) => "Hide Panel",
         }
     }
 
@@ -613,7 +619,10 @@ impl ActionEffect {
             | Self::SwitchTab { target: id, .. }
             | Self::OpenModal(id)
             | Self::CloseModal(id) => Some(*id),
-            Self::CustomRustCode(_) => None,
+            Self::CustomRustCode(_)
+            | Self::TogglePanel(_)
+            | Self::ShowPanel(_)
+            | Self::HidePanel(_) => None,
         }
     }
 }

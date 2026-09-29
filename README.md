@@ -2,7 +2,7 @@
 
 `egui-rad-builder` is an early-stage RAD GUI builder for Rust [`egui`](https://github.com/emilk/egui) applications. It provides a visual drag-and-drop canvas, widget inspector, JSON project save/load, and Rust code generation for `eframe`/`egui` apps.
 
-Current crate version: `0.4.0`
+Current crate version: `0.4.1`
 
 The generated UIs are intended to compile and run, but the project is still under active development. Expect rough edges in layout fidelity, widget nesting, and generated-code ergonomics.
 
@@ -68,7 +68,7 @@ cargo run
 cargo test
 ```
 
-Current local result: `72 passed; 0 failed`.
+Current local result: `74 passed; 0 failed`.
 
 ## Basic Workflow
 
