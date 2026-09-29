@@ -4,9 +4,9 @@
 
 **egui-rad-builder** is a Rapid Application Development (RAD) GUI builder tool for the egui immediate-mode GUI framework. It allows developers to visually design user interfaces through drag-and-drop, then generates production-ready Rust code for egui-based applications.
 
-**Current Version:** 0.3.0
+**Current Version:** 0.4.0
 **License:** MIT
-**Status:** Active development (Undo/Redo, Layers, Layouts, Responsive, Zoom, Examples, ViewStack, Container, Styling)
+**Status:** Active development (Undo/Redo, Layers, Layouts, Responsive, Zoom, Examples, ViewStack, Container, Styling, Viewport Dock Panels)
 
 ---
 
@@ -76,6 +76,26 @@ The official egui demo showcases best practices for widget organization and UX p
 2. **Conditional Features** - Feature-gated components (e.g., chrono-dependent DatePicker)
 3. **Snapshot Testing** - Multiple pixel densities and theme combinations
 4. **Hover Documentation** - Consistent `.on_hover_text()` across all interactive elements
+
+## v0.4.0 Changes (2026-09-28)
+
+### Viewport Dock Panels
+
+Panels (Top, Bottom, Left, Right) are now rendered **inside the device viewport canvas** instead of the outer editor window. This makes the design canvas accurately reflect how the final app will look with top bars, bottom navigation, sidebars, and content areas.
+
+**Key improvements:**
+- Top/Bottom/Left/Right panels are visual sub-regions of the device screen (e.g. 390x844 or 1280x800).
+- Each panel has a configurable size: `h` (height in px) for Top/Bottom, `w` (width in px) for Left/Right.
+- Settings now shows dimension `DragValue` controls when a panel is enabled.
+- Panels show a subtle background tint and separator line; empty panels show a placeholder label (e.g. `[ Top Panel ]`).
+- Center/content area is correctly constrained to the space not occupied by panels, and supports vertical scroll.
+- Drag-and-drop from the palette correctly assigns widgets to the panel area under the cursor.
+- Default panel sizes: Top=56px, Bottom=56px, Left=80px, Right=200px (all backward-compatible via `#[serde(default)]`).
+
+**Files modified:**
+- `src/project.rs` — added `panel_top_height`, `panel_bottom_height`, `panel_left_width`, `panel_right_width` fields.
+- `src/app.rs` — removed outer `egui::TopBottomPanel`/`SidePanel` on `ctx`; replaced with viewport-subdivided painter rects; updated Settings UI.
+- `Cargo.toml`, `README.md`, `Claude.md` — bumped version to `0.4.0`.
 
 ---
 
