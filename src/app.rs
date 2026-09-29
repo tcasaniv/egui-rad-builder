@@ -321,6 +321,60 @@ mod tests {
     }
 
     #[test]
+    fn test_apply_panel_action_effects() {
+        use crate::widget::{ActionEffect, DockArea};
+        use crate::project::Project;
+
+        let mut project = Project::default();
+        assert!(!project.panel_left_enabled);
+        assert!(!project.panel_top_enabled);
+
+        // Toggle Left Panel
+        super::RadBuilderApp::apply_action_effect_to_project(&ActionEffect::TogglePanel(DockArea::Left), &mut project);
+        assert!(project.panel_left_enabled, "TogglePanel should enable left panel");
+
+        super::RadBuilderApp::apply_action_effect_to_project(&ActionEffect::TogglePanel(DockArea::Left), &mut project);
+        assert!(!project.panel_left_enabled, "TogglePanel should disable left panel");
+
+        // Show / Hide Top Panel
+        super::RadBuilderApp::apply_action_effect_to_project(&ActionEffect::ShowPanel(DockArea::Top), &mut project);
+        assert!(project.panel_top_enabled, "ShowPanel should enable top panel");
+
+        super::RadBuilderApp::apply_action_effect_to_project(&ActionEffect::HidePanel(DockArea::Top), &mut project);
+        assert!(!project.panel_top_enabled, "HidePanel should disable top panel");
+    }
+
+    #[test]
+    fn test_codegen_button_click_toggle_panel() {
+        use crate::widget::{ActionEffect, ActionTrigger, WidgetAction, WidgetId, WidgetKind, WidgetProps, DockArea};
+
+        let mut app = super::RadBuilderApp::default();
+        let btn_id = WidgetId::new(1);
+
+        let btn = crate::widget::Widget {
+            id: btn_id,
+            kind: WidgetKind::Button,
+            pos: egui::pos2(10.0, 10.0),
+            size: egui::vec2(80.0, 24.0),
+            z: 1,
+            area: DockArea::Center,
+            props: WidgetProps {
+                text: "Menu".into(),
+                actions: vec![WidgetAction {
+                    trigger: ActionTrigger::OnClick,
+                    effect: ActionEffect::TogglePanel(DockArea::Left),
+                }],
+                ..Default::default()
+            },
+            parent: None,
+        };
+        app.project.widgets.push(btn);
+
+        let code = app.generate_single_file();
+        assert!(code.contains("state.enable_left = !state.enable_left;"), "Codegen should emit toggle for enable_left");
+    }
+
+    #[test]
     fn test_codegen_button_click_toggle_widget() {
         use crate::widget::{ActionEffect, ActionTrigger, WidgetAction, WidgetId, WidgetKind, WidgetProps, DockArea};
 
@@ -1324,6 +1378,7 @@ pub(crate) struct ActionDraft {
     pub(crate) target: Option<WidgetId>,
     pub(crate) text: String,
     pub(crate) tab: usize,
+    pub(crate) panel: DockArea,
     pub(crate) code: String,
 }
 
@@ -1335,6 +1390,7 @@ impl Default for ActionDraft {
             target: None,
             text: String::new(),
             tab: 0,
+            panel: DockArea::Left,
             code: String::new(),
         }
     }
@@ -2067,109 +2123,6 @@ impl RadBuilderApp {
 
         let mut triggered_actions: Vec<ActionEffect> = Vec::new();
 
-        // Top
-        if self.project.panel_top_enabled {
-            egui::TopBottomPanel::top("rb_top")
-                .resizable(true)
-                .show(ctx, |ui| {
-                    let panel_rect = ui.clip_rect();
-                    self.live_top = Some(panel_rect);
-                    if self.show_grid {
-                        self.draw_grid(ui, panel_rect, self.grid_size);
-                    }
-                    for wid in &top_ids {
-                        Self::draw_widget_tree(
-                            ui,
-                            panel_rect,
-                            self.grid_size,
-                            &mut self.selected,
-                            *wid,
-                            &mut self.project.widgets,
-                            &mut triggered_actions,
-                            false,
-                            1.0,
-                        );
-                    }
-                });
-        }
-
-        // Bottom
-        if self.project.panel_bottom_enabled {
-            egui::TopBottomPanel::bottom("rb_bottom")
-                .resizable(true)
-                .show(ctx, |ui| {
-                    let panel_rect = ui.clip_rect();
-                    self.live_bottom = Some(panel_rect);
-                    if self.show_grid {
-                        self.draw_grid(ui, panel_rect, self.grid_size);
-                    }
-                    for wid in &bottom_ids {
-                        Self::draw_widget_tree(
-                            ui,
-                            panel_rect,
-                            self.grid_size,
-                            &mut self.selected,
-                            *wid,
-                            &mut self.project.widgets,
-                            &mut triggered_actions,
-                            false,
-                            1.0,
-                        );
-                    }
-                });
-        }
-
-        // Left
-        if self.project.panel_left_enabled {
-            egui::SidePanel::left("rb_left")
-                .resizable(true)
-                .show(ctx, |ui| {
-                    let panel_rect = ui.clip_rect();
-                    self.live_left = Some(panel_rect);
-                    if self.show_grid {
-                        self.draw_grid(ui, panel_rect, self.grid_size);
-                    }
-                    for wid in &left_ids {
-                        Self::draw_widget_tree(
-                            ui,
-                            panel_rect,
-                            self.grid_size,
-                            &mut self.selected,
-                            *wid,
-                            &mut self.project.widgets,
-                            &mut triggered_actions,
-                            false,
-                            1.0,
-                        );
-                    }
-                });
-        }
-
-        // Right
-        if self.project.panel_right_enabled {
-            egui::SidePanel::right("rb_right")
-                .resizable(true)
-                .show(ctx, |ui| {
-                    let panel_rect = ui.clip_rect();
-                    self.live_right = Some(panel_rect);
-                    if self.show_grid {
-                        self.draw_grid(ui, panel_rect, self.grid_size);
-                    }
-                    for wid in &right_ids {
-                        Self::draw_widget_tree(
-                            ui,
-                            panel_rect,
-                            self.grid_size,
-                            &mut self.selected,
-                            *wid,
-                            &mut self.project.widgets,
-                            &mut triggered_actions,
-                            false,
-                            1.0,
-                        );
-                    }
-                });
-        }
 
         // Center (design canvas / device screen viewport)
         let viewport_size = self.project.canvas_size;
@@ -2725,7 +2678,7 @@ impl RadBuilderApp {
 
         // Apply any actions that were triggered during this frame
         for effect in triggered_actions {
-            Self::apply_action_effect(&effect, &mut self.project.widgets);
+            Self::apply_action_effect_to_project(&effect, &mut self.project);
         }
     }
 
@@ -2787,7 +2740,34 @@ impl RadBuilderApp {
                     tw.props.checked = false;
                 }
             }
-            ActionEffect::CustomRustCode(_) => {}
+            _ => {}
+        }
+    }
+
+    pub(crate) fn apply_action_effect_to_project(effect: &ActionEffect, project: &mut Project) {
+        match effect {
+            ActionEffect::TogglePanel(area) => match area {
+                DockArea::Top => project.panel_top_enabled = !project.panel_top_enabled,
+                DockArea::Bottom => project.panel_bottom_enabled = !project.panel_bottom_enabled,
+                DockArea::Left => project.panel_left_enabled = !project.panel_left_enabled,
+                DockArea::Right => project.panel_right_enabled = !project.panel_right_enabled,
+                _ => {}
+            },
+            ActionEffect::ShowPanel(area) => match area {
+                DockArea::Top => project.panel_top_enabled = true,
+                DockArea::Bottom => project.panel_bottom_enabled = true,
+                DockArea::Left => project.panel_left_enabled = true,
+                DockArea::Right => project.panel_right_enabled = true,
+                _ => {}
+            },
+            ActionEffect::HidePanel(area) => match area {
+                DockArea::Top => project.panel_top_enabled = false,
+                DockArea::Bottom => project.panel_bottom_enabled = false,
+                DockArea::Left => project.panel_left_enabled = false,
+                DockArea::Right => project.panel_right_enabled = false,
+                _ => {}
+            },
+            other => Self::apply_action_effect(other, &mut project.widgets),
         }
     }
 
@@ -4196,39 +4176,153 @@ impl RadBuilderApp {
                     // Render Screen (Root) header item
                     let is_screen_selected = self.selected.is_empty();
                     let mode_name = self.project.root_layout_mode.display_name();
-                    let screen_title = format!("Screen (Root) [{}]", mode_name);
+                    let screen_title = format!("📱 Screen (Root) [{}]", mode_name);
                     ui.horizontal(|ui| {
                         let btn = ui.selectable_label(is_screen_selected, screen_title);
                         if btn.clicked() {
                             self.selected.clear();
                         }
                     });
-                    ui.add_space(2.0);
+                    ui.add_space(4.0);
 
-                    // Render tree recursively starting from root widgets (parent == None)
-                    let root_ids: Vec<WidgetId> = {
-                        let mut roots: Vec<(WidgetId, i32)> = self
-                            .project
-                            .widgets
-                            .iter()
-                            .filter(|w| w.parent.is_none())
-                            .map(|w| (w.id, w.z))
-                            .collect();
-                        roots.sort_by_key(|&(_, z)| std::cmp::Reverse(z));
-                        roots.into_iter().map(|(id, _)| id).collect()
-                    };
+                    // Group root widgets (parent == None) by DockArea
+                    let mut roots: Vec<(WidgetId, i32, DockArea)> = self
+                        .project
+                        .widgets
+                        .iter()
+                        .filter(|w| w.parent.is_none())
+                        .map(|w| (w.id, w.z, w.area))
+                        .collect();
+                    roots.sort_by_key(|&(_, z, _)| std::cmp::Reverse(z));
 
-                    for &wid in &root_ids {
-                        self.render_layer_tree_node(
-                            ui,
-                            wid,
-                            0,
-                            &mut reparent_action,
-                            &mut z_reorder_action,
-                            &mut undo_needed,
-                            &mut ctx_action,
-                            clipboard_has_widget,
-                        );
+                    let mut top_root_ids = Vec::new();
+                    let mut left_root_ids = Vec::new();
+                    let mut center_root_ids = Vec::new();
+                    let mut right_root_ids = Vec::new();
+                    let mut bottom_root_ids = Vec::new();
+
+                    for (id, _, area) in roots {
+                        match area {
+                            DockArea::Top => top_root_ids.push(id),
+                            DockArea::Left => left_root_ids.push(id),
+                            DockArea::Right => right_root_ids.push(id),
+                            DockArea::Bottom => bottom_root_ids.push(id),
+                            DockArea::Center | DockArea::Free => center_root_ids.push(id),
+                        }
+                    }
+
+                    let panel_sections = [
+                        (
+                            DockArea::Top,
+                            "Top Panel (AppBar)",
+                            format!("{:.0}px h", self.project.panel_top_height),
+                            self.project.panel_top_enabled,
+                            top_root_ids,
+                        ),
+                        (
+                            DockArea::Left,
+                            "Left Panel (Sidebar/Drawer)",
+                            format!("{:.0}px w", self.project.panel_left_width),
+                            self.project.panel_left_enabled,
+                            left_root_ids,
+                        ),
+                        (
+                            DockArea::Center,
+                            "Center (Content)",
+                            format!("Layout: {}", mode_name),
+                            true,
+                            center_root_ids,
+                        ),
+                        (
+                            DockArea::Right,
+                            "Right Panel (Drawer)",
+                            format!("{:.0}px w", self.project.panel_right_width),
+                            self.project.panel_right_enabled,
+                            right_root_ids,
+                        ),
+                        (
+                            DockArea::Bottom,
+                            "Bottom Panel (BottomNav)",
+                            format!("{:.0}px h", self.project.panel_bottom_height),
+                            self.project.panel_bottom_enabled,
+                            bottom_root_ids,
+                        ),
+                    ];
+
+                    for (area, title, dim_str, is_en, child_ids) in panel_sections {
+                        ui.horizontal(|ui| {
+                            ui.add_space(8.0);
+                            if area != DockArea::Center {
+                                let eye_txt = if is_en { "👁" } else { "🙈" };
+                                let eye_tip = if is_en { "Panel visible. Click to hide." } else { "Panel hidden. Click to show." };
+                                if ui.small_button(eye_txt).on_hover_text(eye_tip).clicked() {
+                                    undo_needed = true;
+                                    match area {
+                                        DockArea::Top => self.project.panel_top_enabled = !is_en,
+                                        DockArea::Bottom => self.project.panel_bottom_enabled = !is_en,
+                                        DockArea::Left => self.project.panel_left_enabled = !is_en,
+                                        DockArea::Right => self.project.panel_right_enabled = !is_en,
+                                        _ => {}
+                                    }
+                                }
+                            } else {
+                                ui.add_space(20.0);
+                            }
+
+                            let icon = match area {
+                                DockArea::Top => "⬒",
+                                DockArea::Left => "⬓",
+                                DockArea::Center => "⬚",
+                                DockArea::Right => "⬔",
+                                DockArea::Bottom => "⬕",
+                                _ => "□",
+                            };
+
+                            let count = child_ids.len();
+                            let count_text = if count == 0 { "empty".to_string() } else { format!("{count}") };
+                            ui.label(
+                                egui::RichText::new(format!("{} {} [{}] ({})", icon, title, dim_str, count_text))
+                                    .strong()
+                                    .color(if is_en { ui.visuals().text_color() } else { egui::Color32::from_gray(120) })
+                            );
+                        });
+
+                        // Drop zone onto panel to move dragged widget to this panel
+                        if let Some(dragged_id) = self.layer_drag {
+                            let drop_zone = ui.allocate_rect(
+                                egui::Rect::from_min_size(ui.cursor().min, egui::vec2(ui.available_width(), 4.0)),
+                                egui::Sense::hover(),
+                            );
+                            if drop_zone.hovered() {
+                                ui.painter().hline(
+                                    drop_zone.rect.x_range(),
+                                    drop_zone.rect.center().y,
+                                    egui::Stroke::new(2.0_f32, egui::Color32::LIGHT_BLUE),
+                                );
+                                if ui.input(|i| i.pointer.any_released()) {
+                                    reparent_action = Some((dragged_id, None));
+                                    if let Some(w) = self.project.widgets.iter_mut().find(|w| w.id == dragged_id) {
+                                        w.area = area;
+                                    }
+                                    undo_needed = true;
+                                }
+                            }
+                        }
+
+                        // Child widgets inside this panel
+                        for wid in child_ids {
+                            self.render_layer_tree_node(
+                                ui,
+                                wid,
+                                1,
+                                &mut reparent_action,
+                                &mut z_reorder_action,
+                                &mut undo_needed,
+                                &mut ctx_action,
+                                clipboard_has_widget,
+                            );
+                        }
+                        ui.add_space(4.0);
                     }
 
                     // Clear drag state if mouse released anywhere
@@ -5465,6 +5559,15 @@ impl RadBuilderApp {
                                     let t_name = target_widget_names.get(t).map(|s| s.as_str()).unwrap_or("Unknown");
                                     format!("Close {}", t_name)
                                 }
+                                ActionEffect::TogglePanel(p) => {
+                                    format!("Toggle {:?} Panel", p)
+                                }
+                                ActionEffect::ShowPanel(p) => {
+                                    format!("Show {:?} Panel", p)
+                                }
+                                ActionEffect::HidePanel(p) => {
+                                    format!("Hide {:?} Panel", p)
+                                }
                                 ActionEffect::CustomRustCode(code) => {
                                     let snippet = if code.len() > 15 {
                                         format!("{}...", &code[..15])
@@ -5515,6 +5618,9 @@ impl RadBuilderApp {
                             "Switch Tab",
                             "Open Window/Modal",
                             "Close Window/Modal",
+                            "Toggle Panel",
+                            "Show Panel",
+                            "Hide Panel",
                             "Custom Rust Code",
                         ];
 
@@ -5529,7 +5635,7 @@ impl RadBuilderApp {
                                 });
                         });
 
-                        // Target selector for effects 0..=6
+                        // Target selector for widget effects 0..=6
                         if action_draft.effect_kind < 7 {
                             let current_target_label = match action_draft.target {
                                 Some(tid) => target_widget_names.get(&tid).cloned().unwrap_or_else(|| format!("#{tid}")),
@@ -5542,6 +5648,33 @@ impl RadBuilderApp {
                                     .show_ui(ui, |ui| {
                                         for (tid, label) in &all_target_widgets {
                                             ui.selectable_value(&mut action_draft.target, Some(*tid), label);
+                                        }
+                                    });
+                            });
+                        }
+
+                        // Target panel selector for panel effects 7..=9
+                        if action_draft.effect_kind >= 7 && action_draft.effect_kind <= 9 {
+                            const PANEL_TARGETS: &[(DockArea, &str)] = &[
+                                (DockArea::Left, "Left Panel (Sidebar/Drawer)"),
+                                (DockArea::Right, "Right Panel (Drawer)"),
+                                (DockArea::Top, "Top Panel (AppBar)"),
+                                (DockArea::Bottom, "Bottom Panel (BottomNav)"),
+                            ];
+                            let current_panel_label = match action_draft.panel {
+                                DockArea::Left => "Left Panel (Sidebar/Drawer)",
+                                DockArea::Right => "Right Panel (Drawer)",
+                                DockArea::Top => "Top Panel (AppBar)",
+                                DockArea::Bottom => "Bottom Panel (BottomNav)",
+                                _ => "Left Panel (Sidebar/Drawer)",
+                            };
+                            ui.horizontal(|ui| {
+                                ui.label("Panel:");
+                                egui::ComboBox::from_id_salt(("action_draft_panel", w.id))
+                                    .selected_text(current_panel_label)
+                                    .show_ui(ui, |ui| {
+                                        for &(p_area, p_label) in PANEL_TARGETS {
+                                            ui.selectable_value(&mut action_draft.panel, p_area, p_label);
                                         }
                                     });
                             });
@@ -5561,7 +5694,7 @@ impl RadBuilderApp {
                                     ui.add(egui::DragValue::new(&mut action_draft.tab).range(0..=50));
                                 });
                             }
-                            7 => {
+                            10 => {
                                 ui.label("Rust code:");
                                 ui.text_edit_multiline(&mut action_draft.code);
                             }
@@ -5577,7 +5710,10 @@ impl RadBuilderApp {
                                 4 => action_draft.target.map(|t| ActionEffect::SwitchTab { target: t, tab_index: action_draft.tab }),
                                 5 => action_draft.target.map(ActionEffect::OpenModal),
                                 6 => action_draft.target.map(ActionEffect::CloseModal),
-                                7 => Some(ActionEffect::CustomRustCode(action_draft.code.clone())),
+                                7 => Some(ActionEffect::TogglePanel(action_draft.panel)),
+                                8 => Some(ActionEffect::ShowPanel(action_draft.panel)),
+                                9 => Some(ActionEffect::HidePanel(action_draft.panel)),
+                                10 => Some(ActionEffect::CustomRustCode(action_draft.code.clone())),
                                 _ => None,
                             };
 
@@ -5602,7 +5738,7 @@ impl RadBuilderApp {
         self.action_draft = action_draft;
 
         if let Some(effect) = test_action {
-            Self::apply_action_effect(&effect, &mut self.project.widgets);
+            Self::apply_action_effect_to_project(&effect, &mut self.project);
         }
         if let Some(act) = action_to_add {
             self.push_undo();
@@ -6656,6 +6792,36 @@ impl RadBuilderApp {
                     }
                     ActionEffect::CloseModal(target) => {
                         out.push_str(&format!("            state.window_{}_open = false;\n", target));
+                    }
+                    ActionEffect::TogglePanel(area) => {
+                        let var = match area {
+                            DockArea::Top => "enable_top",
+                            DockArea::Bottom => "enable_bottom",
+                            DockArea::Left => "enable_left",
+                            DockArea::Right => "enable_right",
+                            _ => "enable_left",
+                        };
+                        out.push_str(&format!("            state.{} = !state.{};\n", var, var));
+                    }
+                    ActionEffect::ShowPanel(area) => {
+                        let var = match area {
+                            DockArea::Top => "enable_top",
+                            DockArea::Bottom => "enable_bottom",
+                            DockArea::Left => "enable_left",
+                            DockArea::Right => "enable_right",
+                            _ => "enable_left",
+                        };
+                        out.push_str(&format!("            state.{} = true;\n", var));
+                    }
+                    ActionEffect::HidePanel(area) => {
+                        let var = match area {
+                            DockArea::Top => "enable_top",
+                            DockArea::Bottom => "enable_bottom",
+                            DockArea::Left => "enable_left",
+                            DockArea::Right => "enable_right",
+                            _ => "enable_left",
+                        };
+                        out.push_str(&format!("            state.{} = false;\n", var));
                     }
                     ActionEffect::CustomRustCode(code) => {
                         out.push_str(&format!("            {}\n", code.trim()));

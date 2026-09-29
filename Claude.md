@@ -4,9 +4,9 @@
 
 **egui-rad-builder** is a Rapid Application Development (RAD) GUI builder tool for the egui immediate-mode GUI framework. It allows developers to visually design user interfaces through drag-and-drop, then generates production-ready Rust code for egui-based applications.
 
-**Current Version:** 0.4.0
+**Current Version:** 0.4.1
 **License:** MIT
-**Status:** Active development (Undo/Redo, Layers, Layouts, Responsive, Zoom, Examples, ViewStack, Container, Styling, Viewport Dock Panels)
+**Status:** Active development (Undo/Redo, Layers, Layouts, Responsive, Zoom, Examples, ViewStack, Container, Styling, Viewport Dock Panels, Panel Hierarchy & Actions)
 
 ---
 
@@ -76,6 +76,22 @@ The official egui demo showcases best practices for widget organization and UX p
 2. **Conditional Features** - Feature-gated components (e.g., chrono-dependent DatePicker)
 3. **Snapshot Testing** - Multiple pixel densities and theme combinations
 4. **Hover Documentation** - Consistent `.on_hover_text()` across all interactive elements
+
+## v0.4.1 Changes (2026-09-28)
+
+### Panel Hierarchy in Layers & Interactive Panel Actions
+
+- **Fix Panel Duplication**: Completely removed outer `egui::TopBottomPanel`/`SidePanel` calls on `ctx` that caused panels to render twice (both outside and inside viewport).
+- **Structured Layers Hierarchy**: Reorganized the Layers tree into `Screen (Root) -> Panels (Top, Left, Center, Right, Bottom) -> Widgets`.
+  - Each panel row in Layers displays its dock icon, name, dimensions in px, widget count, and an interactive eye toggle (`👁`/`🙈`) to quickly show/hide the panel.
+  - Dragging a widget in Layers onto a panel header immediately reparents and reassigns its dock area to that panel.
+- **Dynamic Panel Actions (Toggle/Show/Hide Panel)**:
+  - Added `ActionEffect::TogglePanel(DockArea)`, `ActionEffect::ShowPanel(DockArea)`, and `ActionEffect::HidePanel(DockArea)`.
+  - Buttons and interactive widgets can now toggle or show/hide any panel (e.g. Hamburger button opening Left sidebar/drawer, filter button opening Right drawer, action sheet toggling Bottom panel).
+  - Works live in Preview mode (F5) and in generated standalone Rust code (`state.enable_left = !state.enable_left;`).
+- **Tests**: 74 unit tests passing, 0 warnings.
+
+---
 
 ## v0.4.0 Changes (2026-09-28)
 
