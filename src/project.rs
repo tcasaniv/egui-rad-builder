@@ -51,6 +51,22 @@ impl ScreenPreset {
     }
 }
 
+fn default_panel_top_height() -> f32 {
+    56.0
+}
+
+fn default_panel_bottom_height() -> f32 {
+    56.0
+}
+
+fn default_panel_left_width() -> f32 {
+    80.0
+}
+
+fn default_panel_right_width() -> f32 {
+    200.0
+}
+
 fn default_root_layout_gap() -> f32 {
     16.0
 }
@@ -64,9 +80,17 @@ pub(crate) struct Project {
     pub(crate) widgets: Vec<Widget>,
     pub(crate) canvas_size: Vec2,
     pub(crate) panel_top_enabled: bool,
+    #[serde(default = "default_panel_top_height")]
+    pub(crate) panel_top_height: f32,
     pub(crate) panel_bottom_enabled: bool,
+    #[serde(default = "default_panel_bottom_height")]
+    pub(crate) panel_bottom_height: f32,
     pub(crate) panel_left_enabled: bool,
+    #[serde(default = "default_panel_left_width")]
+    pub(crate) panel_left_width: f32,
     pub(crate) panel_right_enabled: bool,
+    #[serde(default = "default_panel_right_width")]
+    pub(crate) panel_right_width: f32,
     #[serde(default)]
     pub(crate) screen_preset: ScreenPreset,
 
@@ -146,9 +170,13 @@ impl Default for Project {
             widgets: Vec::new(),
             canvas_size: vec2(700.0, 600.0),
             panel_top_enabled: false,
+            panel_top_height: 56.0,
             panel_bottom_enabled: false,
+            panel_bottom_height: 56.0,
             panel_left_enabled: false,
+            panel_left_width: 80.0,
             panel_right_enabled: false,
+            panel_right_width: 200.0,
             screen_preset: ScreenPreset::Desktop,
             root_layout_mode: LayoutMode::Free,
             root_layout_gap: 16.0,
@@ -172,6 +200,10 @@ mod tests {
         assert_eq!(proj.root_layout_gap, 16.0);
         assert_eq!(proj.root_layout_cols, 2);
         assert_eq!(proj.root_layout_padding, [16.0, 16.0, 16.0, 16.0]);
+        assert_eq!(proj.panel_top_height, 56.0);
+        assert_eq!(proj.panel_bottom_height, 56.0);
+        assert_eq!(proj.panel_left_width, 80.0);
+        assert_eq!(proj.panel_right_width, 200.0);
 
         // Verify JSON backward compat without root layout fields
         let legacy_json = r#"{
@@ -187,6 +219,10 @@ mod tests {
         assert_eq!(parsed.root_layout_mode, LayoutMode::Free);
         assert_eq!(parsed.root_layout_gap, 16.0);
         assert_eq!(parsed.root_layout_cols, 2);
+        assert_eq!(parsed.panel_top_height, 56.0);
+        assert_eq!(parsed.panel_bottom_height, 56.0);
+        assert_eq!(parsed.panel_left_width, 80.0);
+        assert_eq!(parsed.panel_right_width, 200.0);
     }
 }
 

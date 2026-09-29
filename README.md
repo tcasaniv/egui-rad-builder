@@ -2,7 +2,7 @@
 
 `egui-rad-builder` is an early-stage RAD GUI builder for Rust [`egui`](https://github.com/emilk/egui) applications. It provides a visual drag-and-drop canvas, widget inspector, JSON project save/load, and Rust code generation for `eframe`/`egui` apps.
 
-Current crate version: `0.3.0`
+Current crate version: `0.4.0`
 
 The generated UIs are intended to compile and run, but the project is still under active development. Expect rough edges in layout fidelity, widget nesting, and generated-code ergonomics.
 
@@ -25,7 +25,7 @@ Implemented:
 - Figma-grade visual appearance styling: background fills, text colors, font sizes, bold styling, border strokes, and corner radiuses.
 - Smooth canvas zoom (Ctrl+Scroll, %, Fit-to-Screen).
 - Built-in example projects (File -> Examples) showcasing mobile navigation, hamburger side drawers, and responsive screens.
-- Central canvas plus optional top, bottom, left, and right panel areas.
+- Viewport dock panels: Top (AppBar), Bottom (BottomNav), Left (NavRail/Sidebar), Right inside the device canvas — each configurable in size (height/width in px) from Settings.
 - Inspector for widget text, sizing, position, values, colors, item lists, URLs, tooltips, enabled state, and widget-specific options.
 - Multi-select, copy/paste, duplicate, delete, select all, alignment, distribution, and match-size actions.
 - Configurable grid display and grid snapping.

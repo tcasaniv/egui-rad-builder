@@ -1780,11 +1780,7 @@ impl RadBuilderApp {
         let size = kind.default_size();
         let props = kind.default_props();
 
-        let zoom = if matches!(area, DockArea::Center | DockArea::Free) {
-            self.canvas_zoom.clamp(0.1, 4.0)
-        } else {
-            1.0
-        };
+        let zoom = self.canvas_zoom.clamp(0.1, 4.0);
         let vecpos = (at_global - area_origin) / zoom - size * 0.5; // local to area
         let pos = self.snap_pos(pos2(vecpos.x, vecpos.y));
         let w = Widget {
@@ -2184,12 +2180,20 @@ impl RadBuilderApp {
 
         let mut root_ids = center_ids;
         root_ids.extend(free_ids);
-        root_ids.extend(top_ids);
-        root_ids.extend(bottom_ids);
-        root_ids.extend(left_ids);
-        root_ids.extend(right_ids);
 
         let is_portrait = viewport_size.y > viewport_size.x;
+
+        // ── Compute panel dimensions ──────────────────────────────────────────
+        let top_h = if self.project.panel_top_enabled { self.project.panel_top_height } else { 0.0 };
+        let bot_h = if self.project.panel_bottom_enabled { self.project.panel_bottom_height } else { 0.0 };
+        let left_w = if self.project.panel_left_enabled { self.project.panel_left_width } else { 0.0 };
+        let right_w = if self.project.panel_right_enabled { self.project.panel_right_width } else { 0.0 };
+
+        // The center area within the viewport (after subtracting dock panels)
+        let center_viewport = egui::Vec2::new(
+            (viewport_size.x - left_w - right_w).max(0.0),
+            (viewport_size.y - top_h - bot_h).max(0.0),
+        );
 
         if effective_root_mode != LayoutMode::Free {
             let children_info: Vec<(WidgetId, egui::Vec2, SizePolicy, SizePolicy, Option<Align>)> = root_ids
@@ -2216,7 +2220,7 @@ impl RadBuilderApp {
             let hug_height = !has_fill_height;
 
             let layout_rects = Self::compute_auto_layout(
-                viewport_size,
+                center_viewport,
                 effective_root_mode,
                 self.project.root_layout_gap,
                 self.project.root_layout_cols,
@@ -2234,40 +2238,51 @@ impl RadBuilderApp {
                 }
             }
         } else {
-            // Free mode: support screen docking for root widgets
+            // Free mode: support screen docking for root widgets (center/free area)
             for wid in &root_ids {
                 if let Some(cw) = self.project.widgets.iter_mut().find(|x| x.id == *wid) {
                     match cw.area {
-                        DockArea::Top => {
-                            cw.pos = pos2(0.0, 0.0);
-                            cw.size.x = viewport_size.x;
-                        }
-                        DockArea::Bottom => {
-                            cw.pos = pos2(0.0, (viewport_size.y - cw.size.y).max(0.0));
-                            cw.size.x = viewport_size.x;
-                        }
-                        DockArea::Left => {
-                            cw.pos = pos2(0.0, 0.0);
-                            cw.size.y = viewport_size.y;
-                        }
-                        DockArea::Right => {
-                            cw.pos = pos2((viewport_size.x - cw.size.x).max(0.0), 0.0);
-                            cw.size.y = viewport_size.y;
-                        }
-                        _ => {}
+                        DockArea::Center | DockArea::Free => {}
+                        _ => {} // dock panel widgets are positioned independently below
                     }
                 }
             }
         }
 
-        // Inner scrollable content height (allows scrolling to any content taller than viewport)
+        // ── Position dock-panel widgets (always Free within their panel rect) ──
+        // These are positioned relative to their panel origin (0,0).
+        // Enforce width/height fill based on the panel size.
+        let vp = viewport_size;
+        for wid in &top_ids {
+            if let Some(cw) = self.project.widgets.iter_mut().find(|x| x.id == *wid) {
+                cw.pos.y = cw.pos.y.clamp(0.0, (top_h - cw.size.y).max(0.0));
+            }
+        }
+        for wid in &bottom_ids {
+            if let Some(cw) = self.project.widgets.iter_mut().find(|x| x.id == *wid) {
+                cw.pos.y = cw.pos.y.clamp(0.0, (bot_h - cw.size.y).max(0.0));
+            }
+        }
+        for wid in &left_ids {
+            if let Some(cw) = self.project.widgets.iter_mut().find(|x| x.id == *wid) {
+                cw.pos.x = cw.pos.x.clamp(0.0, (left_w - cw.size.x).max(0.0));
+            }
+        }
+        for wid in &right_ids {
+            if let Some(cw) = self.project.widgets.iter_mut().find(|x| x.id == *wid) {
+                cw.pos.x = cw.pos.x.clamp(0.0, (right_w - cw.size.x).max(0.0));
+            }
+        }
+        let _ = vp; // suppress unused warning if no panels enabled
+
+        // Inner scrollable content height (center area only, allows scrolling to any content taller than center)
         let total_content_h = root_ids
             .iter()
             .filter_map(|&wid| self.project.widgets.iter().find(|x| x.id == wid && x.props.active))
             .map(|w| w.pos.y + w.size.y + if effective_root_mode != LayoutMode::Free { self.project.root_layout_padding[2] } else { 0.0 })
             .fold(0.0_f32, f32::max);
-        let scroll_h = total_content_h.max(viewport_size.y);
-        let inner_canvas_size = egui::vec2(viewport_size.x, scroll_h);
+        let scroll_h = total_content_h.max(center_viewport.y);
+        let inner_canvas_size = egui::vec2(center_viewport.x, scroll_h);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             // Ctrl + MouseWheel zoom and Ctrl+0 reset
@@ -2360,60 +2375,303 @@ impl RadBuilderApp {
             });
             ui.add_space(2.0);
 
-            // Container frame for device screen
+            // Container frame for device screen (full viewport size)
             let scaled_viewport_size = viewport_size * zoom;
-            let scaled_inner_size = inner_canvas_size * zoom;
 
             egui::Frame::NONE
                 .stroke(Stroke::new(1.0_f32, Color32::from_gray(65)))
                 .corner_radius(4.0)
                 .fill(ui.visuals().panel_fill)
                 .show(ui, |ui| {
+                    // The outer scroll area is the full device viewport size
                     egui::ScrollArea::both()
-                        .id_salt("device_screen_scroll")
+                        .id_salt("device_screen_outer_scroll")
                         .max_width(scaled_viewport_size.x)
                         .max_height(scaled_viewport_size.y)
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            let (resp, painter) = ui.allocate_painter(scaled_inner_size, egui::Sense::click());
-                            let painter_rect = Rect::from_min_size(resp.rect.min, scaled_inner_size);
-                            self.live_center = Some(ui.clip_rect());
-                            self.live_center_origin = Some(painter_rect.min);
+                            // Allocate the full viewport for interaction
+                            let (full_resp, _full_painter) = ui.allocate_painter(
+                                scaled_viewport_size,
+                                egui::Sense::click(),
+                            );
+                            let vp_origin = full_resp.rect.min;
 
-                            // Canvas background
-                            painter.rect_filled(painter_rect, 0.0, ui.visuals().window_fill());
+                            // Background fill for entire device viewport
+                            _full_painter.rect_filled(full_resp.rect, 0.0, ui.visuals().window_fill());
 
                             if self.show_grid {
-                                self.draw_grid(ui, painter_rect, self.grid_size * zoom);
+                                self.draw_grid(ui, full_resp.rect, self.grid_size * zoom);
                             }
 
-                            for wid in &root_ids {
-                                if let Some(w) = self.project.widgets.iter().find(|x| x.id == *wid) {
-                                    let vis = match w.props.responsive_vis {
-                                        ResponsiveVisibility::Always => true,
-                                        ResponsiveVisibility::PortraitOnly => is_portrait,
-                                        ResponsiveVisibility::LandscapeOnly => !is_portrait,
-                                        ResponsiveVisibility::MobileOnly => viewport_size.x < 768.0,
-                                        ResponsiveVisibility::DesktopOnly => viewport_size.x >= 768.0,
-                                    };
-                                    if !vis {
-                                        continue;
-                                    }
-                                }
-                                Self::draw_widget_tree(
-                                    ui,
-                                    painter_rect,
-                                    self.grid_size,
-                                    &mut self.selected,
-                                    *wid,
-                                    &mut self.project.widgets,
-                                    &mut triggered_actions,
-                                    effective_root_mode != LayoutMode::Free,
-                                    zoom,
+                            // ── Panel separator colors ──────────────────────────
+                            let panel_bg = Color32::from_rgba_premultiplied(30, 30, 45, 230);
+                            let panel_sep = Color32::from_gray(70);
+                            let panel_label_color = Color32::from_gray(120);
+
+                            // ── TOP PANEL ─────────────────────────────────────────
+                            if self.project.panel_top_enabled {
+                                let scaled_top_h = top_h * zoom;
+                                let top_rect = Rect::from_min_size(
+                                    vp_origin,
+                                    egui::vec2(scaled_viewport_size.x, scaled_top_h),
                                 );
+                                self.live_top = Some(top_rect);
+                                _full_painter.rect_filled(top_rect, 0.0, panel_bg);
+                                _full_painter.line_segment(
+                                    [top_rect.left_bottom(), top_rect.right_bottom()],
+                                    Stroke::new(1.0_f32, panel_sep),
+                                );
+                                if top_ids.is_empty() {
+                                    _full_painter.text(
+                                        top_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "[ Top Panel ]",
+                                        egui::FontId::proportional(11.0 * zoom),
+                                        panel_label_color,
+                                    );
+                                }
+                                for wid in &top_ids {
+                                    if let Some(w) = self.project.widgets.iter().find(|x| x.id == *wid) {
+                                        let vis = match w.props.responsive_vis {
+                                            ResponsiveVisibility::Always => true,
+                                            ResponsiveVisibility::PortraitOnly => is_portrait,
+                                            ResponsiveVisibility::LandscapeOnly => !is_portrait,
+                                            ResponsiveVisibility::MobileOnly => viewport_size.x < 768.0,
+                                            ResponsiveVisibility::DesktopOnly => viewport_size.x >= 768.0,
+                                        };
+                                        if !vis { continue; }
+                                    }
+                                    Self::draw_widget_tree(
+                                        ui,
+                                        top_rect,
+                                        self.grid_size,
+                                        &mut self.selected,
+                                        *wid,
+                                        &mut self.project.widgets,
+                                        &mut triggered_actions,
+                                        false,
+                                        zoom,
+                                    );
+                                }
                             }
 
-                            if resp.clicked() {
+                            // ── BOTTOM PANEL ──────────────────────────────────────
+                            if self.project.panel_bottom_enabled {
+                                let scaled_bot_h = bot_h * zoom;
+                                let bot_rect = Rect::from_min_size(
+                                    vp_origin + egui::vec2(0.0, scaled_viewport_size.y - scaled_bot_h),
+                                    egui::vec2(scaled_viewport_size.x, scaled_bot_h),
+                                );
+                                self.live_bottom = Some(bot_rect);
+                                _full_painter.rect_filled(bot_rect, 0.0, panel_bg);
+                                _full_painter.line_segment(
+                                    [bot_rect.left_top(), bot_rect.right_top()],
+                                    Stroke::new(1.0_f32, panel_sep),
+                                );
+                                if bottom_ids.is_empty() {
+                                    _full_painter.text(
+                                        bot_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "[ Bottom Panel ]",
+                                        egui::FontId::proportional(11.0 * zoom),
+                                        panel_label_color,
+                                    );
+                                }
+                                for wid in &bottom_ids {
+                                    if let Some(w) = self.project.widgets.iter().find(|x| x.id == *wid) {
+                                        let vis = match w.props.responsive_vis {
+                                            ResponsiveVisibility::Always => true,
+                                            ResponsiveVisibility::PortraitOnly => is_portrait,
+                                            ResponsiveVisibility::LandscapeOnly => !is_portrait,
+                                            ResponsiveVisibility::MobileOnly => viewport_size.x < 768.0,
+                                            ResponsiveVisibility::DesktopOnly => viewport_size.x >= 768.0,
+                                        };
+                                        if !vis { continue; }
+                                    }
+                                    Self::draw_widget_tree(
+                                        ui,
+                                        bot_rect,
+                                        self.grid_size,
+                                        &mut self.selected,
+                                        *wid,
+                                        &mut self.project.widgets,
+                                        &mut triggered_actions,
+                                        false,
+                                        zoom,
+                                    );
+                                }
+                            }
+
+                            // ── LEFT PANEL ────────────────────────────────────────
+                            if self.project.panel_left_enabled {
+                                let scaled_top_h = top_h * zoom;
+                                let scaled_bot_h = bot_h * zoom;
+                                let scaled_left_w = left_w * zoom;
+                                let mid_h = scaled_viewport_size.y - scaled_top_h - scaled_bot_h;
+                                let left_rect = Rect::from_min_size(
+                                    vp_origin + egui::vec2(0.0, scaled_top_h),
+                                    egui::vec2(scaled_left_w, mid_h.max(0.0)),
+                                );
+                                self.live_left = Some(left_rect);
+                                _full_painter.rect_filled(left_rect, 0.0, panel_bg);
+                                _full_painter.line_segment(
+                                    [left_rect.right_top(), left_rect.right_bottom()],
+                                    Stroke::new(1.0_f32, panel_sep),
+                                );
+                                if left_ids.is_empty() {
+                                    _full_painter.text(
+                                        left_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "[ Left ]",
+                                        egui::FontId::proportional(10.0 * zoom),
+                                        panel_label_color,
+                                    );
+                                }
+                                for wid in &left_ids {
+                                    if let Some(w) = self.project.widgets.iter().find(|x| x.id == *wid) {
+                                        let vis = match w.props.responsive_vis {
+                                            ResponsiveVisibility::Always => true,
+                                            ResponsiveVisibility::PortraitOnly => is_portrait,
+                                            ResponsiveVisibility::LandscapeOnly => !is_portrait,
+                                            ResponsiveVisibility::MobileOnly => viewport_size.x < 768.0,
+                                            ResponsiveVisibility::DesktopOnly => viewport_size.x >= 768.0,
+                                        };
+                                        if !vis { continue; }
+                                    }
+                                    Self::draw_widget_tree(
+                                        ui,
+                                        left_rect,
+                                        self.grid_size,
+                                        &mut self.selected,
+                                        *wid,
+                                        &mut self.project.widgets,
+                                        &mut triggered_actions,
+                                        false,
+                                        zoom,
+                                    );
+                                }
+                            }
+
+                            // ── RIGHT PANEL ───────────────────────────────────────
+                            if self.project.panel_right_enabled {
+                                let scaled_top_h = top_h * zoom;
+                                let scaled_bot_h = bot_h * zoom;
+                                let scaled_right_w = right_w * zoom;
+                                let mid_h = scaled_viewport_size.y - scaled_top_h - scaled_bot_h;
+                                let right_rect = Rect::from_min_size(
+                                    vp_origin + egui::vec2(scaled_viewport_size.x - scaled_right_w, scaled_top_h),
+                                    egui::vec2(scaled_right_w, mid_h.max(0.0)),
+                                );
+                                self.live_right = Some(right_rect);
+                                _full_painter.rect_filled(right_rect, 0.0, panel_bg);
+                                _full_painter.line_segment(
+                                    [right_rect.left_top(), right_rect.left_bottom()],
+                                    Stroke::new(1.0_f32, panel_sep),
+                                );
+                                if right_ids.is_empty() {
+                                    _full_painter.text(
+                                        right_rect.center(),
+                                        egui::Align2::CENTER_CENTER,
+                                        "[ Right ]",
+                                        egui::FontId::proportional(10.0 * zoom),
+                                        panel_label_color,
+                                    );
+                                }
+                                for wid in &right_ids {
+                                    if let Some(w) = self.project.widgets.iter().find(|x| x.id == *wid) {
+                                        let vis = match w.props.responsive_vis {
+                                            ResponsiveVisibility::Always => true,
+                                            ResponsiveVisibility::PortraitOnly => is_portrait,
+                                            ResponsiveVisibility::LandscapeOnly => !is_portrait,
+                                            ResponsiveVisibility::MobileOnly => viewport_size.x < 768.0,
+                                            ResponsiveVisibility::DesktopOnly => viewport_size.x >= 768.0,
+                                        };
+                                        if !vis { continue; }
+                                    }
+                                    Self::draw_widget_tree(
+                                        ui,
+                                        right_rect,
+                                        self.grid_size,
+                                        &mut self.selected,
+                                        *wid,
+                                        &mut self.project.widgets,
+                                        &mut triggered_actions,
+                                        false,
+                                        zoom,
+                                    );
+                                }
+                            }
+
+                            // ── CENTER / CONTENT AREA ─────────────────────────────
+                            {
+                                let scaled_top_h = top_h * zoom;
+                                let scaled_bot_h = bot_h * zoom;
+                                let scaled_left_w = left_w * zoom;
+                                let scaled_right_w = right_w * zoom;
+                                let scaled_inner_size = inner_canvas_size * zoom;
+                                let center_origin = vp_origin + egui::vec2(scaled_left_w, scaled_top_h);
+                                let center_visible_w = (scaled_viewport_size.x - scaled_left_w - scaled_right_w).max(0.0);
+                                let center_visible_h = (scaled_viewport_size.y - scaled_top_h - scaled_bot_h).max(0.0);
+                                let center_clip_rect = Rect::from_min_size(center_origin, egui::vec2(center_visible_w, center_visible_h));
+                                let center_alloc_size = egui::vec2(scaled_inner_size.x, scaled_inner_size.y.max(center_visible_h));
+
+                                self.live_center = Some(center_clip_rect);
+                                self.live_center_origin = Some(center_origin);
+
+                                // Draw center area background (slightly different to distinguish from panels)
+                                _full_painter.rect_filled(center_clip_rect, 0.0, ui.visuals().window_fill());
+
+                                // Use a child ui scoped to the center region for center widgets
+                                let center_ui_builder = UiBuilder::new()
+                                    .max_rect(center_clip_rect)
+                                    .sense(Sense::click());
+                                let mut center_ui = ui.new_child(center_ui_builder);
+
+                                // Inner scroll for center content
+                                egui::ScrollArea::vertical()
+                                    .id_salt("device_center_scroll")
+                                    .max_width(center_visible_w)
+                                    .max_height(center_visible_h)
+                                    .auto_shrink([false, false])
+                                    .show(&mut center_ui, |center_ui| {
+                                        let (center_resp, _center_painter) = center_ui.allocate_painter(
+                                            center_alloc_size,
+                                            egui::Sense::click(),
+                                        );
+                                        let center_rect = Rect::from_min_size(center_resp.rect.min, center_alloc_size);
+
+                                        for wid in &root_ids {
+                                            if let Some(w) = self.project.widgets.iter().find(|x| x.id == *wid) {
+                                                let vis = match w.props.responsive_vis {
+                                                    ResponsiveVisibility::Always => true,
+                                                    ResponsiveVisibility::PortraitOnly => is_portrait,
+                                                    ResponsiveVisibility::LandscapeOnly => !is_portrait,
+                                                    ResponsiveVisibility::MobileOnly => viewport_size.x < 768.0,
+                                                    ResponsiveVisibility::DesktopOnly => viewport_size.x >= 768.0,
+                                                };
+                                                if !vis { continue; }
+                                            }
+                                            Self::draw_widget_tree(
+                                                center_ui,
+                                                center_rect,
+                                                self.grid_size,
+                                                &mut self.selected,
+                                                *wid,
+                                                &mut self.project.widgets,
+                                                &mut triggered_actions,
+                                                effective_root_mode != LayoutMode::Free,
+                                                zoom,
+                                            );
+                                        }
+
+                                        if center_resp.clicked() {
+                                            self.selected.clear();
+                                        }
+                                    });
+                            }
+
+                            if full_resp.clicked() {
                                 self.selected.clear();
                             }
                         });
@@ -5699,12 +5957,36 @@ impl RadBuilderApp {
                     ui.add(egui::DragValue::new(&mut self.project.canvas_size.y));
                 });
                 ui.separator();
-                ui.strong("Panels");
+                ui.strong("Panels (inside viewport)");
                 ui.add_space(4.0);
-                ui.checkbox(&mut self.project.panel_top_enabled, "Top");
-                ui.checkbox(&mut self.project.panel_bottom_enabled, "Bottom");
-                ui.checkbox(&mut self.project.panel_left_enabled, "Left");
-                ui.checkbox(&mut self.project.panel_right_enabled, "Right");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.project.panel_top_enabled, "Top");
+                    if self.project.panel_top_enabled {
+                        ui.label("h:");
+                        ui.add(egui::DragValue::new(&mut self.project.panel_top_height).range(20.0..=300.0).speed(1.0).suffix(" px"));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.project.panel_bottom_enabled, "Bottom");
+                    if self.project.panel_bottom_enabled {
+                        ui.label("h:");
+                        ui.add(egui::DragValue::new(&mut self.project.panel_bottom_height).range(20.0..=300.0).speed(1.0).suffix(" px"));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.project.panel_left_enabled, "Left");
+                    if self.project.panel_left_enabled {
+                        ui.label("w:");
+                        ui.add(egui::DragValue::new(&mut self.project.panel_left_width).range(20.0..=600.0).speed(1.0).suffix(" px"));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut self.project.panel_right_enabled, "Right");
+                    if self.project.panel_right_enabled {
+                        ui.label("w:");
+                        ui.add(egui::DragValue::new(&mut self.project.panel_right_width).range(20.0..=600.0).speed(1.0).suffix(" px"));
+                    }
+                });
                 ui.separator();
                 ui.strong("Code Generation");
                 ui.add_space(4.0);
